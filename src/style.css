@@ -183,6 +183,11 @@ body {
     background: #ffffff;
     cursor: crosshair;
     display: block;
+    width: 500px;
+    height: 500px;
+    aspect-ratio: 1 / 1;
+    object-fit: contain;
+    overflow: hidden;
 }
 
 .mandala-controls {
@@ -811,10 +816,11 @@ body {
     }
 
     #mandala-canvas {
-        width: 90vw;
-        height: 90vw;
-        max-width: 350px;
-        max-height: 350px;
+        width: min(90vw, 500px);
+        height: min(90vw, 500px);
+        max-width: 500px;
+        max-height: 500px;
+        aspect-ratio: 1 / 1;
     }
 
     .mandala-controls {

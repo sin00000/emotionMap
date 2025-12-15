@@ -4,6 +4,9 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { PathFinder } from './pathfinding.js';
+import { AudioManager } from './audio-manager.js';
+import { addPlace as savePlace, getUserPlaces, deletePlace as removePlace } from './places-service.js';
 
 import { initializeApp } from 'firebase/app';
 import {
@@ -18,13 +21,7 @@ import {
   doc,
   setDoc,
   getDoc,
-  collection,
-  addDoc,
-  getDocs,
-  updateDoc,
-  deleteDoc,
-  query,
-  orderBy
+  updateDoc
 } from 'firebase/firestore';
 
 // Firebase configuration
@@ -513,13 +510,24 @@ function setupAuthListeners() {
   });
 
   // Auth state listener
-  onAuthStateChanged(auth, (user) => {
+  onAuthStateChanged(auth, async (user) => {
     if (user) {
-      console.log('✅ User authenticated');
+      console.log('✅ User authenticated:', user.uid);
       showScreen('map');
-      initMapView();
+
+      if (mapView) {
+        mapView.reset();                // 전체 상태 초기화
+        mapView.setUser(user.uid);      // uid 명시적 설정
+        await mapView.loadPlaces();     // 해당 uid로만 로드
+        mapView.rebuildSurface();       // 표면 필드 재생성
+      } else {
+        await initMapView(user.uid);    // ✅ uid 전달
+      }
     } else {
       showScreen('auth');
+      if (mapView) {
+        mapView.reset();
+      }
     }
   });
 }
@@ -813,11 +821,24 @@ class MapView {
     this.longPressTimer = null;
     this.longPressDuration = 2000;
 
+    // User ID (uid 명시적 관리)
+    this.currentUserId = null;
+
     // User GPS location (starting point)
     this.userGPS = {
       latitude: 37.5665,  // Seoul
       longitude: 126.9780
     };
+
+    // Initialize PathFinder and AudioManager
+    this.pathFinder = new PathFinder();
+    this.audioManager = new AudioManager();
+    this.currentRouteLine = null; // 3D route visualization
+
+    // GPS tracking
+    this.gpsWatchId = null;
+    this.isGPSActive = false;
+    this.lastGPSUpdate = null;
 
     // 3D Setup
     this.scene = new THREE.Scene();
@@ -840,14 +861,135 @@ class MapView {
     // 카메라 위치
     this.camera.position.z = 3;
 
-    // 흰색 구 생성
-    const geometry = new THREE.SphereGeometry(1, 64, 64);
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      wireframe: false
+    // ShaderMaterial 기반 구 생성 (필드 기반 장소 표현)
+    const geometry = new THREE.SphereGeometry(1, 128, 128); // 고해상도
+
+    // Places 데이터를 uniform으로 전달
+    this.sphereUniforms = {
+      uTime: { value: 0.0 },
+      uPlacesCount: { value: 0 },
+      uPlacePositions: { value: new Array(64).fill(new THREE.Vector3(0, 0, 0)) },
+      uPlaceIntimacy: { value: new Float32Array(64) },
+      uPlaceRadius: { value: new Float32Array(64) },
+      uPlaceVisualScale: { value: new Float32Array(64) }, // 시각적 크기 (intimacy 기반)
+      uPlaceColors: { value: new Array(64).fill(new THREE.Color(1, 1, 1)) },
+      uPlaceBlocked: { value: new Float32Array(64) },
+      uDistortionScale: { value: 0.15 }
+    };
+
+    const material = new THREE.ShaderMaterial({
+      uniforms: this.sphereUniforms,
+      vertexShader: `
+        uniform float uTime;
+        uniform int uPlacesCount;
+        uniform vec3 uPlacePositions[64];
+        uniform float uPlaceIntimacy[64];
+        uniform float uPlaceRadius[64];
+        uniform float uDistortionScale;
+
+        varying vec3 vNormal;
+        varying vec3 vPosition;
+
+        void main() {
+          vNormal = normalize(normalMatrix * normal);
+          vec3 pos = position;
+          vec3 n = normalize(pos);
+
+          // 각 장소의 영향을 누적
+          float totalDisplacement = 0.0;
+
+          for(int i = 0; i < 64; i++) {
+            if(i >= uPlacesCount) break;
+
+            vec3 placeNormal = normalize(uPlacePositions[i]);
+            float angle = acos(dot(n, placeNormal));
+            float radius = uPlaceRadius[i];
+
+            // 원형 마스크 (각도 기반)
+            float mask = smoothstep(radius, radius * 0.7, angle);
+
+            // 친밀도 기반 변형 강도
+            float intimacy = uPlaceIntimacy[i];
+            float amplitude = mask * (intimacy * 2.0 - 1.0); // -1 ~ 1
+
+            totalDisplacement += amplitude;
+          }
+
+          // 구 표면 변형
+          pos += n * totalDisplacement * uDistortionScale;
+
+          vPosition = pos;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform int uPlacesCount;
+        uniform vec3 uPlacePositions[64];
+        uniform float uPlaceIntimacy[64];
+        uniform float uPlaceRadius[64];
+        uniform float uPlaceVisualScale[64];
+        uniform vec3 uPlaceColors[64];
+        uniform float uPlaceBlocked[64];
+
+        varying vec3 vNormal;
+        varying vec3 vPosition;
+
+        void main() {
+          vec3 n = normalize(vPosition);
+          vec3 baseColor = vec3(1.0, 1.0, 1.0); // 흰색 베이스
+          vec3 finalColor = baseColor;
+          float totalWeight = 0.0;
+          float blocked = 0.0;
+
+          for(int i = 0; i < 64; i++) {
+            if(i >= uPlacesCount) break;
+
+            vec3 placeNormal = normalize(uPlacePositions[i]);
+            float angle = acos(clamp(dot(n, placeNormal), -1.0, 1.0));
+            float baseRadius = uPlaceRadius[i];
+            float visualScale = uPlaceVisualScale[i];
+
+            // 시각적 크기 적용 (intimacy 기반)
+            float effectiveRadius = baseRadius * visualScale;
+
+            // 원형 마스크 (각도 기반, 완벽한 원형)
+            float mask = smoothstep(effectiveRadius, effectiveRadius * 0.8, angle);
+
+            if(mask > 0.01) {
+              float intimacy = uPlaceIntimacy[i];
+              float weight = mask * intimacy;
+
+              // 감정 색상 혼합
+              finalColor += uPlaceColors[i] * weight;
+              totalWeight += weight;
+
+              // Blocked 영역 누적
+              blocked = max(blocked, mask * uPlaceBlocked[i]);
+            }
+          }
+
+          // 가중 평균으로 색상 결정
+          if(totalWeight > 0.0) {
+            finalColor = mix(baseColor, finalColor / totalWeight, totalWeight);
+          }
+
+          // Blocked 영역은 검게
+          finalColor = mix(finalColor, vec3(0.0, 0.0, 0.0), blocked);
+
+          gl_FragColor = vec4(finalColor, 1.0);
+        }
+      `,
+      side: THREE.DoubleSide,
+      wireframe: false // 디버깅 시 true로 변경
     });
+
     this.sphere = new THREE.Mesh(geometry, material);
+    this.sphereMaterial = material; // 원본 셰이더 머티리얼 저장
     this.scene.add(this.sphere);
+
+    // 디버그 모드
+    this.debugMode = false;
+    this.setupDebugKeys();
 
     // 사용자 위치 마커 (검은색 점)
     this.userMarker = null;
@@ -864,6 +1006,15 @@ class MapView {
     this.controls.minDistance = 1.5;
     this.controls.maxDistance = 5;
 
+    // Raycaster for 3D object interaction
+    this.raycaster = new THREE.Raycaster();
+    this.mouse = new THREE.Vector2();
+    this.touchStartTime = 0;
+    this.userMarkerColor = 0x000000; // Default black
+
+    // Add interaction events
+    this.setupUserMarkerInteraction();
+
     this.init();
   }
 
@@ -873,23 +1024,364 @@ class MapView {
     this.createPlaceholders();
     this.setupButtons();
     this.setupMovementControls();
+    this.startGPSTracking(); // Start real-time GPS
     this.animate();
   }
 
   /**
-   * 사용자 위치 마커 생성 (검은색 점)
+   * Start real-time GPS tracking
+   */
+  startGPSTracking() {
+    if (!navigator.geolocation) {
+      console.warn('⚠️ Geolocation is not supported by this browser');
+      alert('이 브라우저는 GPS를 지원하지 않습니다. 기본 위치(서울)를 사용합니다.');
+      return;
+    }
+
+    console.log('📍 Requesting GPS permission...');
+
+    // Request GPS permission and start watching position
+    this.gpsWatchId = navigator.geolocation.watchPosition(
+      (position) => {
+        // Success callback
+        const newLat = position.coords.latitude;
+        const newLng = position.coords.longitude;
+        const accuracy = position.coords.accuracy;
+
+        console.log(`📍 GPS Update: ${newLat.toFixed(6)}°N, ${newLng.toFixed(6)}°E (±${accuracy.toFixed(0)}m)`);
+
+        // Update user GPS location
+        this.userGPS.latitude = newLat;
+        this.userGPS.longitude = newLng;
+        this.lastGPSUpdate = new Date();
+        this.isGPSActive = true;
+
+        // Update user marker on 3D sphere
+        this.updateUserMarker();
+
+        // Update audio based on new location (if navigation is active)
+        if (this.audioUpdateInterval) {
+          // Audio will be updated automatically by the interval
+        }
+
+        // Show GPS status (first time only)
+        if (!this.hasShownGPSSuccess) {
+          this.hasShownGPSSuccess = true;
+          console.log('✅ GPS tracking activated!');
+          this.showGPSStatus('GPS 활성화', true);
+        }
+      },
+      (error) => {
+        // Error callback
+        console.error('❌ GPS Error:', error.message);
+        this.isGPSActive = false;
+
+        let errorMessage = 'GPS 위치를 가져올 수 없습니다.';
+
+        switch(error.code) {
+          case error.PERMISSION_DENIED:
+            errorMessage = 'GPS 권한이 거부되었습니다. 브라우저 설정에서 위치 권한을 허용해주세요.';
+            break;
+          case error.POSITION_UNAVAILABLE:
+            errorMessage = 'GPS 위치를 사용할 수 없습니다.';
+            break;
+          case error.TIMEOUT:
+            errorMessage = 'GPS 요청 시간이 초과되었습니다.';
+            break;
+        }
+
+        this.showGPSStatus(errorMessage, false);
+        console.log('📍 Using default location (Seoul): 37.5665°N, 126.9780°E');
+      },
+      {
+        enableHighAccuracy: true,  // Use GPS instead of network location
+        timeout: 10000,             // 10 seconds timeout
+        maximumAge: 0               // Don't use cached position
+      }
+    );
+
+    console.log('🔄 GPS tracking started (watch ID: ' + this.gpsWatchId + ')');
+  }
+
+  /**
+   * Stop GPS tracking
+   */
+  stopGPSTracking() {
+    if (this.gpsWatchId !== null) {
+      navigator.geolocation.clearWatch(this.gpsWatchId);
+      this.gpsWatchId = null;
+      this.isGPSActive = false;
+      console.log('🛑 GPS tracking stopped');
+    }
+  }
+
+  /**
+   * Show GPS status message
+   */
+  showGPSStatus(message, isSuccess) {
+    // Create or update GPS status indicator
+    let statusEl = document.getElementById('gps-status');
+
+    if (!statusEl) {
+      statusEl = document.createElement('div');
+      statusEl.id = 'gps-status';
+      statusEl.style.cssText = `
+        position: fixed;
+        top: 60px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 12px 24px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        z-index: 1000;
+        transition: opacity 0.3s;
+        pointer-events: none;
+      `;
+      document.body.appendChild(statusEl);
+    }
+
+    statusEl.textContent = message;
+    statusEl.style.backgroundColor = isSuccess ? 'rgba(100, 255, 218, 0.9)' : 'rgba(244, 67, 54, 0.9)';
+    statusEl.style.color = isSuccess ? '#000' : '#fff';
+    statusEl.style.opacity = '1';
+
+    // Auto-hide after 3 seconds
+    setTimeout(() => {
+      statusEl.style.opacity = '0';
+      setTimeout(() => {
+        if (statusEl.parentNode) {
+          statusEl.parentNode.removeChild(statusEl);
+        }
+      }, 300);
+    }, 3000);
+  }
+
+  /**
+   * 사용자 위치 마커 생성 (검은색 점, 구 표면에 부착)
    */
   createUserMarker() {
-    const position = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1.03);
+    // 구 표면에 정확히 부착 (radius = 1.0)
+    const position = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1.0);
 
-    // 검은색 구 마커
+    // 사용자 지정 색상 또는 기본 검은색
     const geometry = new THREE.SphereGeometry(0.02, 16, 16);
-    const material = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    const material = new THREE.MeshBasicMaterial({ color: this.userMarkerColor });
     this.userMarker = new THREE.Mesh(geometry, material);
     this.userMarker.position.copy(position);
+    this.userMarker.userData = { isUserMarker: true }; // 식별용
 
     this.scene.add(this.userMarker);
-    console.log(`📍 User marker at ${this.userGPS.latitude.toFixed(4)}°N, ${this.userGPS.longitude.toFixed(4)}°E`);
+    console.log(`📍 User marker attached to sphere surface at ${this.userGPS.latitude.toFixed(4)}°N, ${this.userGPS.longitude.toFixed(4)}°E`);
+  }
+
+  /**
+   * 사용자 마커 상호작용 설정 (꾹 누르기 → 색상 변경)
+   */
+  setupUserMarkerInteraction() {
+    const canvas = this.renderer.domElement;
+    let isLongPressing = false;
+    let startX = 0;
+    let startY = 0;
+
+    // 터치 시작
+    const onTouchStart = (event) => {
+      const touch = event.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+
+      this.mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
+      this.mouse.y = -(touch.clientY / (window.innerHeight - 150)) * 2 + 1;
+
+      // Raycasting
+      this.raycaster.setFromCamera(this.mouse, this.camera);
+      const intersects = this.raycaster.intersectObject(this.userMarker);
+
+      if (intersects.length > 0) {
+        event.preventDefault(); // User marker 클릭 시에만 prevent
+        isLongPressing = true;
+        this.controls.enabled = false; // OrbitControls 비활성화
+
+        // Long press 타이머 시작
+        this.longPressTimer = setTimeout(() => {
+          if (isLongPressing) {
+            this.showColorPicker();
+            isLongPressing = false;
+            this.controls.enabled = true;
+          }
+        }, 800); // 0.8초 꾹 누르기
+      }
+    };
+
+    // 터치 이동 (드래그 감지)
+    const onTouchMove = (event) => {
+      if (isLongPressing) {
+        const touch = event.touches[0];
+        const moveX = Math.abs(touch.clientX - startX);
+        const moveY = Math.abs(touch.clientY - startY);
+
+        // 10px 이상 움직이면 취소
+        if (moveX > 10 || moveY > 10) {
+          if (this.longPressTimer) {
+            clearTimeout(this.longPressTimer);
+            this.longPressTimer = null;
+          }
+          isLongPressing = false;
+          this.controls.enabled = true;
+        }
+      }
+    };
+
+    // 터치 종료
+    const onTouchEnd = () => {
+      if (this.longPressTimer) {
+        clearTimeout(this.longPressTimer);
+        this.longPressTimer = null;
+      }
+      isLongPressing = false;
+      this.controls.enabled = true;
+    };
+
+    // 마우스 이벤트 (데스크톱)
+    const onMouseDown = (event) => {
+      startX = event.clientX;
+      startY = event.clientY;
+
+      this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+      this.mouse.y = -(event.clientY / (window.innerHeight - 150)) * 2 + 1;
+
+      this.raycaster.setFromCamera(this.mouse, this.camera);
+      const intersects = this.raycaster.intersectObject(this.userMarker);
+
+      if (intersects.length > 0) {
+        event.preventDefault(); // User marker 클릭 시에만 prevent
+        event.stopPropagation(); // 이벤트 전파 중단
+        isLongPressing = true;
+        this.controls.enabled = false; // OrbitControls 비활성화
+
+        this.longPressTimer = setTimeout(() => {
+          if (isLongPressing) {
+            this.showColorPicker();
+            isLongPressing = false;
+            this.controls.enabled = true;
+          }
+        }, 800);
+      }
+    };
+
+    // 마우스 이동 (드래그 감지)
+    const onMouseMove = (event) => {
+      if (isLongPressing) {
+        const moveX = Math.abs(event.clientX - startX);
+        const moveY = Math.abs(event.clientY - startY);
+
+        // 10px 이상 움직이면 취소
+        if (moveX > 10 || moveY > 10) {
+          if (this.longPressTimer) {
+            clearTimeout(this.longPressTimer);
+            this.longPressTimer = null;
+          }
+          isLongPressing = false;
+          this.controls.enabled = true;
+        }
+      }
+    };
+
+    const onMouseUp = () => {
+      if (this.longPressTimer) {
+        clearTimeout(this.longPressTimer);
+        this.longPressTimer = null;
+      }
+      isLongPressing = false;
+      this.controls.enabled = true;
+    };
+
+    // 이벤트 리스너 등록
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvas.addEventListener('touchend', onTouchEnd);
+    canvas.addEventListener('mousedown', onMouseDown);
+    canvas.addEventListener('mousemove', onMouseMove);
+    canvas.addEventListener('mouseup', onMouseUp);
+  }
+
+  /**
+   * 색상 선택 UI 표시
+   */
+  showColorPicker() {
+    console.log('🎨 Showing color picker for user marker');
+
+    // 기존 컬러 피커가 있으면 제거
+    const existingPicker = document.getElementById('user-marker-color-picker');
+    if (existingPicker) {
+      existingPicker.remove();
+    }
+
+    // 컬러 피커 생성
+    const pickerContainer = document.createElement('div');
+    pickerContainer.id = 'user-marker-color-picker';
+    pickerContainer.style.cssText = `
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      z-index: 10000;
+      text-align: center;
+    `;
+
+    pickerContainer.innerHTML = `
+      <h3 style="margin: 0 0 15px 0; color: #333;">내 위치 색상 선택</h3>
+      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px;">
+        <button class="color-btn" data-color="#000000" style="background: #000000; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#FF0000" style="background: #FF0000; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#00FF00" style="background: #00FF00; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#0000FF" style="background: #0000FF; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#FFFF00" style="background: #FFFF00; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#FF00FF" style="background: #FF00FF; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#00FFFF" style="background: #00FFFF; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#FFA500" style="background: #FFA500; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#800080" style="background: #800080; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#FFC0CB" style="background: #FFC0CB; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#A52A2A" style="background: #A52A2A; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+        <button class="color-btn" data-color="#808080" style="background: #808080; width: 50px; height: 50px; border: 2px solid #ddd; border-radius: 5px; cursor: pointer;"></button>
+      </div>
+      <button id="close-color-picker" style="padding: 10px 20px; background: #64FFDA; border: none; border-radius: 5px; cursor: pointer; font-weight: bold;">닫기</button>
+    `;
+
+    document.body.appendChild(pickerContainer);
+
+    // 색상 버튼 클릭 이벤트
+    pickerContainer.querySelectorAll('.color-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const color = btn.dataset.color;
+        this.changeUserMarkerColor(color);
+        pickerContainer.remove();
+      });
+    });
+
+    // 닫기 버튼
+    document.getElementById('close-color-picker').addEventListener('click', () => {
+      pickerContainer.remove();
+    });
+  }
+
+  /**
+   * 사용자 마커 색상 변경
+   */
+  changeUserMarkerColor(hexColor) {
+    const colorInt = parseInt(hexColor.replace('#', ''), 16);
+    this.userMarkerColor = colorInt;
+
+    if (this.userMarker) {
+      this.userMarker.material.color.setHex(colorInt);
+      console.log(`🎨 User marker color changed to ${hexColor}`);
+    }
+
+    // TODO: Firebase에 저장 (선택사항)
   }
 
   /**
@@ -897,125 +1389,360 @@ class MapView {
    */
   updateUserMarker() {
     if (this.userMarker) {
-      const position = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1.03);
+      // 구 표면에 정확히 부착 (radius = 1.0)
+      const position = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1.0);
       this.userMarker.position.copy(position);
     }
-  }
 
-  /**
-   * 친밀도 기반 극적 왜곡 계산
-   * 한 점에서 모든 장소의 영향을 합산하여 왜곡된 위치 계산
-   */
-  calculateDistortion3D(position) {
-    if (this.placeholders.length === 0) {
-      return position.clone();
-    }
-
-    let totalDisplacement = new THREE.Vector3(0, 0, 0);
-
+    // Decal은 위치 변경 불가 → 모든 마커 제거 후 재생성
     this.placeholders.forEach(place => {
-      const placePos = this.latLonToVector3(place.latitude, place.longitude, 1);
-
-      // 점에서 장소로의 벡터
-      const toPlace = placePos.clone().sub(position);
-      const distance = toPlace.length();
-
-      if (distance < 0.001) return; // 너무 가까우면 무시
-
-      // 영향력 반경 (구 표면 기준)
-      const influenceRadius = 0.8; // 구 둘레의 약 1/8
-
-      if (distance < influenceRadius) {
-        // 방향 벡터 정규화
-        const direction = toPlace.clone().normalize();
-
-        // 친밀도 효과 (매우 극단적으로 강화)
-        const intimacyNormalized = place.intimacy / 100; // 0 to 1
-
-        // 초극적인 지수 사용: I^6 (만다라 배치와 동일)
-        const intimacyPower = Math.pow(intimacyNormalized, 6);
-
-        // 거리 감쇠 (가까울수록 강한 영향)
-        const falloff = 1 - (distance / influenceRadius);
-        const strength = Math.pow(falloff, 1.5);
-
-        // 끌어당김/밀어냄 계산 (매우 극단적)
-        // Intimacy 100% → +4.0 (매우 강하게 압축)
-        // Intimacy 0% → -4.0 (매우 강하게 팽창)
-        const attractionFactor = (intimacyPower - 0.5) * 8; // -4.0 to +4.0
-
-        // 최종 변위 (초극적 효과)
-        const displacementMagnitude = attractionFactor * strength * 0.5; // 최대 0.5 (구 반지름의 50%)
-
-        totalDisplacement.add(direction.multiplyScalar(displacementMagnitude));
+      if (place.marker3D) {
+        this.scene.remove(place.marker3D);
+        place.marker3D.geometry.dispose();
+        place.marker3D.material.dispose();
+      }
+      if (place.glowSprite3D) {
+        this.scene.remove(place.glowSprite3D);
+        place.glowSprite3D.geometry.dispose();
+        place.glowSprite3D.material.dispose();
       }
     });
 
-    return position.clone().add(totalDisplacement);
+    // 모든 장소 마커 재생성 (왜곡된 위치로)
+    this.placeholders.forEach(place => {
+      this.addPlaceMarker(place);
+    });
+
+    // 그리드도 재생성 (왜곡이 사용자 중심이므로)
+    this.createDistortedGrid();
   }
 
   /**
-   * 왜곡된 그리드 생성 (친밀도 기반)
+   * 친밀도 기반 그리드 왜곡 계산 (구 표면에 부착)
+   * 그리드 밀도를 친밀도에 따라 조절 (촘촘함/희박함)
+   */
+  /**
+   * 감정적 거리 계산 (Emotional Distance Formula)
+   * Emotional Distance = Actual Distance × (1 - Affinity Scale)
+   * @param {Object} place - 장소 데이터
+   * @returns {number} - 감정적 각도 거리 (radians)
+   */
+  calculateEmotionalDistance(place) {
+    // 사용자 위치
+    const userPos = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1);
+
+    // 장소의 실제 위치
+    const placePos = this.latLonToVector3(place.latitude, place.longitude, 1);
+
+    // 실제 각도 거리 (Actual Distance in radians)
+    const actualAngularDist = userPos.angleTo(placePos);
+
+    // Affinity Scale (0~1)
+    const affinityScale = place.intimacy / 100;
+
+    // Emotional Distance = Actual Distance × (1 - Affinity Scale)
+    const emotionalDist = actualAngularDist * (1 - affinityScale);
+
+    return emotionalDist;
+  }
+
+  /**
+   * 친밀도 기반 시공간 왜곡 (사용자 중심)
+   * 사용자 위치를 원점으로, 친밀도에 따라 공간을 압축/확장
+   */
+  calculateDistortion3D(position) {
+    // 항상 구 표면에 유지 (radius = 1.0)
+    const normalizedPos = position.clone().normalize();
+
+    if (this.placeholders.length === 0) {
+      return normalizedPos;
+    }
+
+    // 사용자 위치 (왜곡의 중심)
+    const userPos = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1);
+
+    // 모든 장소의 영향 계산 (시공간 압축/확장)
+    let totalInfluence = new THREE.Vector3(0, 0, 0);
+    let totalWeight = 0;
+
+    this.placeholders.forEach(place => {
+      // 장소의 감정적 거리 계산
+      const emotionalDist = this.calculateEmotionalDistance(place);
+
+      // 장소의 실제 위치
+      const actualPlacePos = this.latLonToVector3(place.latitude, place.longitude, 1);
+
+      // 왜곡된 장소 위치 계산 (사용자 방향에서 emotional distance만큼 떨어진 지점)
+      const directionToPlace = actualPlacePos.clone().sub(userPos).normalize();
+      const warpedPlacePos = userPos.clone().add(
+        directionToPlace.multiplyScalar(Math.sin(emotionalDist))
+      ).normalize();
+
+      // 현재 점이 사용자-장소 경로 근처에 있는지 확인
+      const angularDistToWarpedPlace = normalizedPos.angleTo(warpedPlacePos);
+      const influenceRadius = Math.PI / 3; // 60도 영향권
+
+      if (angularDistToWarpedPlace < influenceRadius) {
+        // 친밀도에 따른 압축 강도
+        const intimacy = place.intimacy / 100;
+        const compressionStrength = Math.pow(intimacy, 1.5); // 비선형 압축
+
+        // 거리 감쇠 (부드러운 코사인 곡선)
+        const falloff = Math.cos(angularDistToWarpedPlace * Math.PI / (2 * influenceRadius));
+
+        // 왜곡 방향: 왜곡된 장소 위치로
+        const direction = warpedPlacePos.clone().sub(normalizedPos).normalize();
+
+        // 영향 계산: 친밀도 높을수록 강하게 당김
+        const influence = direction.multiplyScalar(compressionStrength * falloff * 0.3);
+
+        totalInfluence.add(influence);
+        totalWeight += falloff;
+      }
+    });
+
+    if (totalWeight > 0) {
+      // 평균 영향 적용
+      totalInfluence.multiplyScalar(1.0 / totalWeight);
+
+      // 부드럽게 왜곡 적용
+      const distorted = normalizedPos.clone().add(totalInfluence);
+
+      // 구 표면에 다시 정규화 (반드시 표면에 부착)
+      return distorted.normalize();
+    }
+
+    return normalizedPos;
+  }
+
+  /**
+   * 장소의 왜곡된 3D 위치 계산 (감정적 거리 기반)
+   * @param {Object} placeData - 장소 데이터
+   * @returns {THREE.Vector3} - 왜곡된 위치 (구 표면에 부착)
+   */
+  getWarpedPlacePosition(placeData) {
+    // 사용자 위치 (왜곡의 중심)
+    const userPos = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1);
+
+    // 장소의 실제 위치
+    const actualPlacePos = this.latLonToVector3(placeData.latitude, placeData.longitude, 1);
+
+    // 감정적 거리 계산
+    let emotionalDist = this.calculateEmotionalDistance(placeData);
+
+    // ⚠️ 중요: 최소 거리 제약 (사용자 위치와 겹치지 않도록)
+    // 최소 8도 (약 0.14 radians) 떨어져 있어야 함
+    const MIN_DISTANCE = 8 * Math.PI / 180; // 8 degrees in radians
+    emotionalDist = Math.max(emotionalDist, MIN_DISTANCE);
+
+    // 사용자에서 장소로의 방향
+    const directionToPlace = actualPlacePos.clone().sub(userPos).normalize();
+
+    // 왜곡된 위치: 사용자로부터 감정적 거리만큼 떨어진 지점
+    // sin(emotionalDist)를 사용하여 구 표면에서의 실제 거리로 변환
+    const warpedPos = userPos.clone().add(
+      directionToPlace.multiplyScalar(Math.sin(emotionalDist))
+    );
+
+    // 구 표면에 정규화 (반드시 radius = 1.0)
+    return warpedPos.normalize();
+  }
+
+  /**
+   * 친밀도 기반 시공간 왜곡 그리드 생성
+   * D_emotional = D_actual × (1 - intimacy_scale)
    */
   createDistortedGrid() {
     // 기존 그리드 제거
     if (this.gridGroup) {
       this.scene.remove(this.gridGroup);
+      this.gridGroup.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+      this.gridGroup = null;
     }
 
     this.gridGroup = new THREE.Group();
 
-    // 위도선 (Latitude lines) - 왜곡 적용
-    for (let lat = -80; lat <= 80; lat += 10) {
+    // 그리드 라인 설정
+    const gridLines = 24; // 경도선 수
+    const latLines = 12;  // 위도선 수
+    const gridColor = new THREE.Color(0x64FFDA);
+    const gridOpacity = 0.15;
+
+    // === 경도선 (Meridians) ===
+    for (let i = 0; i < gridLines; i++) {
+      const longitude = (i / gridLines) * Math.PI * 2;
       const points = [];
 
-      for (let lon = 0; lon <= 360; lon += 3) {
-        const originalPos = this.latLonToVector3(lat, lon, 1);
-        const distortedPos = this.calculateDistortion3D(originalPos);
-        points.push(distortedPos);
+      for (let j = 0; j <= 180; j++) {
+        const latitude = (j / 180) * Math.PI - Math.PI / 2;
+
+        // 기본 구체 좌표
+        let position = new THREE.Vector3(
+          Math.cos(latitude) * Math.cos(longitude),
+          Math.sin(latitude),
+          Math.cos(latitude) * Math.sin(longitude)
+        );
+
+        // 친밀도 기반 왜곡 적용
+        position = this.applyEmotionalDistortion(position, latitude, longitude);
+        points.push(position);
       }
 
-      if (points.length > 1) {
-        const geometry = new THREE.BufferGeometry().setFromPoints(points);
-        const material = new THREE.LineBasicMaterial({
-          color: 0x000000,
-          opacity: 0.3,
-          transparent: true
-        });
-        const line = new THREE.Line(geometry, material);
-        this.gridGroup.add(line);
-      }
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({
+        color: gridColor,
+        opacity: gridOpacity,
+        transparent: true
+      });
+      const line = new THREE.Line(geometry, material);
+      this.gridGroup.add(line);
     }
 
-    // 경도선 (Longitude lines) - 왜곡 적용
-    for (let lon = 0; lon < 360; lon += 10) {
+    // === 위도선 (Parallels) ===
+    for (let i = 1; i < latLines; i++) {
+      const latitude = (i / latLines) * Math.PI - Math.PI / 2;
       const points = [];
 
-      for (let lat = -90; lat <= 90; lat += 3) {
-        const originalPos = this.latLonToVector3(lat, lon, 1);
-        const distortedPos = this.calculateDistortion3D(originalPos);
-        points.push(distortedPos);
+      for (let j = 0; j <= 360; j++) {
+        const longitude = (j / 360) * Math.PI * 2;
+
+        // 기본 구체 좌표
+        let position = new THREE.Vector3(
+          Math.cos(latitude) * Math.cos(longitude),
+          Math.sin(latitude),
+          Math.cos(latitude) * Math.sin(longitude)
+        );
+
+        // 친밀도 기반 왜곡 적용
+        position = this.applyEmotionalDistortion(position, latitude, longitude);
+        points.push(position);
       }
 
-      if (points.length > 1) {
-        const geometry = new THREE.BufferGeometry().setFromPoints(points);
-        const material = new THREE.LineBasicMaterial({
-          color: 0x000000,
-          opacity: 0.3,
-          transparent: true
-        });
-        const line = new THREE.Line(geometry, material);
-        this.gridGroup.add(line);
-      }
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({
+        color: gridColor,
+        opacity: gridOpacity,
+        transparent: true
+      });
+      const line = new THREE.Line(geometry, material);
+      this.gridGroup.add(line);
     }
 
     this.scene.add(this.gridGroup);
-    console.log('🌐 Distorted grid created with', this.placeholders.length, 'place(s)');
+    console.log('🌐 Grid created with emotional distortion');
+  }
+
+  /**
+   * 친밀도 기반 시공간 왜곡 적용
+   * D_emotional = D_actual × (1 - intimacy_scale)
+   */
+  applyEmotionalDistortion(position, lat, lng) {
+    if (this.placeholders.length === 0) {
+      return position;
+    }
+
+    let maxDistortion = 0;
+    let closestPlace = null;
+
+    // 모든 장소에 대해 영향력 계산
+    this.placeholders.forEach(place => {
+      const placePos = this.latLonToVector3(place.latitude, place.longitude, 1.0);
+      const actualDistance = position.angleTo(placePos);
+
+      // 영향 반경 내에 있는 경우
+      const influenceRadius = 0.5; // radians (약 30도)
+      if (actualDistance < influenceRadius) {
+        const intimacyScale = place.intimacy / 100; // 0-1 scale
+
+        // 친밀도가 높을수록 더 많이 압축
+        // D_emotional = D_actual × (1 - intimacy_scale)
+        const compressionFactor = 1 - (intimacyScale * 0.7); // 최대 70% 압축
+
+        // 거리 기반 감쇠 (가까울수록 영향력 높음)
+        const falloff = 1 - (actualDistance / influenceRadius);
+        const distortionStrength = intimacyScale * falloff * 0.3;
+
+        if (distortionStrength > maxDistortion) {
+          maxDistortion = distortionStrength;
+          closestPlace = place;
+        }
+      }
+    });
+
+    // 왜곡 적용
+    if (closestPlace && maxDistortion > 0) {
+      const placePos = this.latLonToVector3(closestPlace.latitude, closestPlace.longitude, 1.0);
+      const direction = new THREE.Vector3().subVectors(placePos, position);
+
+      // 곡선적 압축 (구체 표면을 따라)
+      position.add(direction.multiplyScalar(maxDistortion));
+      position.normalize(); // 구체 표면에 유지
+    }
+
+    return position;
+  }
+
+  /**
+   * 디버그 키 설정 (D키: 디버그 모드 토글)
+   */
+  setupDebugKeys() {
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'd' || e.key === 'D') {
+        this.debugMode = !this.debugMode;
+        console.log(`🔧 Debug mode: ${this.debugMode ? 'ON' : 'OFF'}`);
+
+        if (this.debugMode) {
+          // A단계: MeshBasicMaterial로 강제 교체
+          this.sphere.material = new THREE.MeshBasicMaterial({
+            color: 0xff00ff, // 마젠타 (눈에 잘 띄는 색)
+            wireframe: true,
+            side: THREE.DoubleSide
+          });
+          console.log('  ✅ Switched to wireframe MeshBasicMaterial');
+          console.log('  📊 Sphere position:', this.sphere.position);
+          console.log('  📊 Sphere scale:', this.sphere.scale);
+          console.log('  📊 Camera position:', this.camera.position);
+          console.log('  📊 Scene children count:', this.scene.children.length);
+
+          // Uniform 검증
+          if (this.sphereUniforms) {
+            console.log('  📊 Uniforms:');
+            console.log('    - Places count:', this.sphereUniforms.uPlacesCount.value);
+            console.log('    - First 3 place positions:', this.sphereUniforms.uPlacePositions.value.slice(0, 3));
+            console.log('    - First 3 intimacy:', Array.from(this.sphereUniforms.uPlaceIntimacy.value.slice(0, 3)));
+            console.log('    - First 3 radius:', Array.from(this.sphereUniforms.uPlaceRadius.value.slice(0, 3)));
+          }
+        } else {
+          // 원본 셰이더 머티리얼로 복원
+          this.sphere.material = this.sphereMaterial;
+          console.log('  ✅ Restored to ShaderMaterial');
+        }
+      }
+
+      // W키: wireframe 토글
+      if (e.key === 'w' || e.key === 'W') {
+        if (this.sphere.material === this.sphereMaterial) {
+          this.sphereMaterial.wireframe = !this.sphereMaterial.wireframe;
+          console.log(`🔧 Wireframe: ${this.sphereMaterial.wireframe ? 'ON' : 'OFF'}`);
+        }
+      }
+    });
+
+    console.log('🎮 Debug keys ready: D (debug mode), W (wireframe toggle)');
   }
 
   animate() {
     requestAnimationFrame(() => this.animate());
     this.controls.update();
+
+    // Update shader uniforms
+    if (this.sphereUniforms) {
+      this.sphereUniforms.uTime.value += 0.01;
+    }
+
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -1117,120 +1844,187 @@ class MapView {
   }
 
   async addPlace(placeData) {
-    // Add to local array
-    this.placeholders.push(placeData);
-    console.log('✅ Place added to map:', placeData.name);
+    console.log('✅ Adding place to map:', placeData.name);
+    console.log('   Location:', placeData.latitude, placeData.longitude);
+    console.log('   Intimacy:', placeData.intimacy);
 
-    // Add 3D marker to sphere (왜곡된 위치에)
-    this.addPlaceMarker(placeData);
-
-    // 그리드 다시 그리기 (새 장소의 영향 반영)
-    this.createDistortedGrid();
-
-    // Save to Firebase Firestore (필드명을 규칙에 맞게 변환)
+    // Save to Firebase Firestore FIRST using places-service
     try {
-      const user = auth.currentUser;
-      if (user) {
-        const firestoreData = {
-          realLat: placeData.latitude,
-          realLng: placeData.longitude,
-          familiarity: placeData.intimacy / 100, // 0-100 → 0-1
-          keywords: placeData.emotionKeywords || [],
-          memory: placeData.memory || null,
-          mandalaImage: placeData.mandalaImage || null,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
+      const firestorePlaceData = {
+        realPlaceName: placeData.name,
+        latitude: placeData.latitude,
+        longitude: placeData.longitude,
+        intimacyScore: placeData.intimacy,
+        emotionKeywords: placeData.emotionKeywords || [],
+        memoryText: placeData.memory || '',
+        themeSongURL: placeData.themeSongURL || '',
+        mandalaImage: placeData.mandalaImage || null
+      };
 
-        console.log('📤 Saving to Firebase:', firestoreData);
+      console.log('📤 Saving to Firebase:', firestorePlaceData);
 
-        const docRef = await addDoc(collection(db, 'users', user.uid, 'places'), firestoreData);
+      const savedPlace = await savePlace(firestorePlaceData);
 
-        // Store document ID for future updates
-        placeData.docId = docRef.id;
-        console.log('💾 ✅ Place saved to Firebase successfully!');
-        console.log('   Document ID:', docRef.id);
-        console.log('   Path: users/' + user.uid + '/places/' + docRef.id);
-      }
+      // Store the Firebase document ID
+      placeData.placeId = savedPlace.placeId;
+      placeData.docId = savedPlace.placeId;
+
+      console.log('💾 ✅ Place saved to Firebase successfully!');
+      console.log('   Document ID:', savedPlace.placeId);
+
     } catch (error) {
       console.error('❌ Firebase save failed!');
       console.error('   Error code:', error.code);
       console.error('   Error message:', error.message);
       console.error('   Full error:', error);
-      showError('장소 저장 실패: ' + error.message);
+      alert('장소 저장 실패: ' + error.message);
+      return; // Don't add to map if save failed
     }
+
+    // Now add to local array and render
+    this.placeholders.push(placeData);
+
+    // Add 3D marker to sphere (왜곡된 위치에)
+    this.addPlaceMarker(placeData);
+
+    // Update PathFinder with new places
+    this.pathFinder.setPlaces(this.placeholders);
+
+    // Load theme song for this place
+    if (placeData.themeSongURL) {
+      this.audioManager.loadThemeSong(placeData.id, placeData.themeSongURL);
+    }
+
+    // 그리드 다시 그리기 (새 장소의 영향 반영)
+    this.createDistortedGrid();
   }
 
   /**
-   * Add a 3D marker for a place on the sphere (왜곡된 위치에)
+   * 감정 키워드에 따른 글로우 색상 반환
    */
-  addPlaceMarker(placeData) {
-    // Convert GPS to 3D position on sphere surface
-    const originalPosition = this.latLonToVector3(placeData.latitude, placeData.longitude, 1.02);
+  getEmotionalGlowColor(emotionKeywords) {
+    const emotionColorMap = {
+      'joy': '#FFD700',        // 금색
+      'happiness': '#FFD700',
+      'love': '#FF69B4',       // 핑크
+      'affection': '#FF69B4',
+      'peace': '#87CEEB',      // 하늘색
+      'calm': '#87CEEB',
+      'excitement': '#FF4500', // 주황
+      'energy': '#FF4500',
+      'sadness': '#4169E1',    // 로얄 블루
+      'melancholy': '#4169E1',
+      'anger': '#DC143C',      // 진홍
+      'frustration': '#DC143C',
+      'fear': '#9370DB',       // 보라
+      'anxiety': '#9370DB',
+      'disgust': '#8B4513',    // 갈색
+      'avoidance': '#696969',  // 회색
+      'nostalgia': '#DDA0DD',  // 자주
+      'longing': '#DDA0DD',
+      'gratitude': '#00FA9A',  // 민트
+      'appreciation': '#00FA9A'
+    };
 
-    // 사용자 위치 기준으로 친밀도에 따라 왜곡 적용
-    const userPos = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1);
-    const toPlace = originalPosition.clone().sub(userPos);
-    const distance = toPlace.length();
-
-    // 친밀도 기반 거리 왜곡 (매우 극단적으로)
-    const intimacyNormalized = placeData.intimacy / 100;
-    const intimacyPower = Math.pow(intimacyNormalized, 6); // I^6 (초극적 효과)
-
-    // 왜곡 계수: 친밀도가 높으면 매우 가까이, 낮으면 매우 멀리
-    // Intimacy 100% → 0.05 (실제 거리의 5%로 초압축)
-    // Intimacy 50% → 5.0 (실제 거리의 500%)
-    // Intimacy 0% → 10.0 (실제 거리의 1000%로 초팽창)
-    const distortionFactor = 0.05 + (1 - intimacyPower) * 9.95;
-
-    const distortedDistance = distance * distortionFactor;
-    const direction = toPlace.normalize();
-    const distortedPosition = userPos.clone().add(direction.multiplyScalar(distortedDistance));
-
-    // Create sprite for mandala or simple marker
-    let sprite;
-
-    if (placeData.mandalaImage) {
-      // Use mandala image as sprite texture
-      const texture = new THREE.TextureLoader().load(placeData.mandalaImage);
-      const spriteMaterial = new THREE.SpriteMaterial({
-        map: texture,
-        transparent: true
-      });
-      sprite = new THREE.Sprite(spriteMaterial);
-      sprite.scale.set(0.15, 0.15, 1);
-    } else {
-      // Simple colored marker
-      const canvas = document.createElement('canvas');
-      canvas.width = 64;
-      canvas.height = 64;
-      const ctx = canvas.getContext('2d');
-
-      // Draw circle
-      ctx.fillStyle = placeData.glowColor || '#64FFDA';
-      ctx.beginPath();
-      ctx.arc(32, 32, 28, 0, Math.PI * 2);
-      ctx.fill();
-
-      const texture = new THREE.CanvasTexture(canvas);
-      const spriteMaterial = new THREE.SpriteMaterial({
-        map: texture,
-        transparent: true
-      });
-      sprite = new THREE.Sprite(spriteMaterial);
-      sprite.scale.set(0.1, 0.1, 1);
+    if (!emotionKeywords || emotionKeywords.length === 0) {
+      return '#64FFDA'; // 기본 청록색
     }
 
-    sprite.position.copy(distortedPosition);
-    sprite.userData = { placeData };
-    this.scene.add(sprite);
+    // 첫 번째 감정 키워드로 색상 결정
+    for (const emotion of emotionKeywords) {
+      if (emotionColorMap[emotion.toLowerCase()]) {
+        return emotionColorMap[emotion.toLowerCase()];
+      }
+    }
 
-    // Store reference for later removal/updates
-    placeData.marker3D = sprite;
+    return '#64FFDA';
+  }
 
-    console.log(`📍 Added marker at ${placeData.latitude.toFixed(2)}°N`);
-    console.log(`   Intimacy: ${placeData.intimacy}% → Distance factor: ${distortionFactor.toFixed(2)}x`);
-    console.log(`   ${placeData.intimacy >= 70 ? '🔴 VERY CLOSE' : placeData.intimacy >= 40 ? '🟡 MODERATE' : '🔵 VERY FAR'}`);
+  /**
+   * Add a place to sphere field (필드 기반, Decal 없음)
+   */
+  addPlaceMarker(placeData) {
+    // 친밀도 (0~1)
+    const intimacy = placeData.intimacy / 100.0;
+
+    // === 배치 위치 계산 (사용자 기준 거리 조정) ===
+    const userNormal = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1).normalize();
+    const realNormal = this.latLonToVector3(placeData.latitude, placeData.longitude, 1).normalize();
+
+    // 실제 각도 거리 (clamp로 안전하게)
+    const dot = THREE.MathUtils.clamp(userNormal.dot(realNormal), -1, 1);
+    const actualAngle = Math.acos(dot);
+
+    // 친밀도 기반 목표 각도 (실제 각도 기준으로 보정)
+    const near = Math.max(actualAngle * 0.2, Math.PI * 0.05); // 가까운 한계 (18도 이상)
+    const far = Math.min(actualAngle * 1.6, Math.PI * 0.85); // 먼 한계 (153도 이하)
+    const targetAngle = far + (near - far) * intimacy;
+
+    // 방향은 유지, 거리만 조정
+    let normal;
+    if (actualAngle < 0.001) {
+      // 사용자와 장소가 거의 같은 위치일 때
+      normal = realNormal.clone();
+    } else {
+      // 회전축 계산 (antipodal 처리)
+      let axis = new THREE.Vector3().crossVectors(userNormal, realNormal);
+
+      // 거의 평행/반평행일 때 (cross product가 거의 0)
+      if (axis.lengthSq() < 1e-8) {
+        // 임의의 수직축 생성
+        axis = new THREE.Vector3(1, 0, 0).cross(userNormal);
+        if (axis.lengthSq() < 1e-8) {
+          axis = new THREE.Vector3(0, 1, 0).cross(userNormal);
+        }
+      }
+      axis.normalize();
+
+      // 목표 각도만큼 회전
+      const quaternion = new THREE.Quaternion().setFromAxisAngle(axis, targetAngle);
+      normal = userNormal.clone().applyQuaternion(quaternion).normalize();
+    }
+
+    // 감정 기반 색상
+    const colorHex = this.getEmotionalGlowColor(placeData.emotionKeywords);
+    const color = new THREE.Color(colorHex);
+
+    // 반지름 (영향 범위) - intimacy와 무관하게 고정
+    const baseRadius = 0.3; // 모든 장소 동일한 기본 영향 범위
+
+    // 시각적 크기 (intimacy 기반) - 사용자 요구사항대로
+    const t = intimacy; // 0~1
+    const scaleMin = 0.45;
+    const scaleMax = 1.35;
+    const visualScale = scaleMin + (scaleMax - scaleMin) * t;
+
+    // avoidance 계열 감정인지 확인
+    const isAvoidance = placeData.emotionKeywords &&
+      placeData.emotionKeywords.some(e =>
+        ['avoidance', 'disgust', 'fear', 'anxiety'].includes(e.toLowerCase())
+      );
+    const blocked = isAvoidance && intimacy < 0.3 ? 1.0 : 0.0;
+
+    // uniform 배열에 추가
+    const index = this.sphereUniforms.uPlacesCount.value;
+    if (index < 64) {
+      this.sphereUniforms.uPlacePositions.value[index] = normal;
+      this.sphereUniforms.uPlaceIntimacy.value[index] = intimacy;
+      this.sphereUniforms.uPlaceRadius.value[index] = baseRadius;
+      this.sphereUniforms.uPlaceVisualScale.value[index] = visualScale;
+      this.sphereUniforms.uPlaceColors.value[index] = color;
+      this.sphereUniforms.uPlaceBlocked.value[index] = blocked;
+      this.sphereUniforms.uPlacesCount.value++;
+
+      console.log(`🎨 Field place added [${index}]: ${placeData.name}`);
+      console.log(`   Real: ${placeData.latitude.toFixed(4)}°N, ${placeData.longitude.toFixed(4)}°E`);
+      console.log(`   Angle: actual=${(actualAngle * 180 / Math.PI).toFixed(1)}°, target=${(targetAngle * 180 / Math.PI).toFixed(1)}°`);
+      console.log(`   Normal: (${normal.x.toFixed(3)}, ${normal.y.toFixed(3)}, ${normal.z.toFixed(3)})`);
+      console.log(`   Color: ${colorHex}, Intimacy: ${intimacy.toFixed(2)}, Base Radius: ${baseRadius.toFixed(3)}, Blocked: ${blocked}`);
+      console.log(`🌀 Mandala scale applied: ${placeData.name}, intimacy=${t.toFixed(2)}, scale=${visualScale.toFixed(2)}`);
+      console.log(`   Total places count: ${this.sphereUniforms.uPlacesCount.value}`);
+    } else {
+      console.warn('⚠️ Maximum places (64) reached!');
+    }
   }
 
   async updatePlace(placeData) {
@@ -1256,54 +2050,111 @@ class MapView {
     }
   }
 
+  /**
+   * uid 명시적 설정
+   */
+  setUser(uid) {
+    console.log(`👤 Setting user ID: ${uid}`);
+    this.currentUserId = uid;
+  }
+
+  /**
+   * 전체 초기화 (로그아웃 또는 사용자 전환 시)
+   */
+  reset() {
+    console.log('🔄 Resetting MapView state...');
+
+    // 데이터 초기화
+    this.placeholders = [];
+    this.pathFinder.setPlaces([]);
+
+    // Uniform 초기화
+    if (this.sphereUniforms) {
+      this.sphereUniforms.uPlacesCount.value = 0;
+      // 배열 초기화
+      for (let i = 0; i < 64; i++) {
+        this.sphereUniforms.uPlacePositions.value[i] = new THREE.Vector3(0, 0, 0);
+        this.sphereUniforms.uPlaceIntimacy.value[i] = 0;
+        this.sphereUniforms.uPlaceRadius.value[i] = 0;
+        this.sphereUniforms.uPlaceVisualScale.value[i] = 1.0;
+        this.sphereUniforms.uPlaceColors.value[i] = new THREE.Color(1, 1, 1);
+        this.sphereUniforms.uPlaceBlocked.value[i] = 0;
+      }
+    }
+
+    this.currentUserId = null;
+    console.log('  ✅ Reset complete');
+  }
+
+  /**
+   * 표면 필드 재생성 (장소 로드 후 호출)
+   */
+  rebuildSurface() {
+    console.log('🎨 Rebuilding sphere surface fields...');
+
+    if (!this.sphereUniforms) {
+      console.warn('  ⚠️ No sphere uniforms available');
+      return;
+    }
+
+    // 모든 uniform 배열 needsUpdate 플래그 설정 (Three.js가 GPU로 전송하도록)
+    // (Three.js의 uniform은 자동으로 업데이트되지만, 명시적으로 확인)
+    console.log(`  📊 Current places count: ${this.sphereUniforms.uPlacesCount.value}`);
+    console.log(`  ✅ Surface rebuild complete`);
+  }
+
   async loadPlaces() {
     try {
-      const user = auth.currentUser;
-      if (!user) {
-        console.log('⚠️ No user authenticated, skipping place load');
+      // currentUserId 사용 (명시적 uid)
+      if (!this.currentUserId) {
+        console.log('⚠️ No user ID set, skipping place load');
         return;
       }
 
-      console.log('🔄 Loading places from Firebase...');
-      console.log('   Path: users/' + user.uid + '/places');
+      console.log(`🔄 Loading places for user: ${this.currentUserId}`);
       showLoading(true);
 
-      const placesRef = collection(db, 'users', user.uid, 'places');
-      const q = query(placesRef, orderBy('createdAt', 'desc'));
-      const querySnapshot = await getDocs(q);
+      // Use places-service to load places
+      const places = await getUserPlaces();
 
-      console.log('📥 Firebase returned', querySnapshot.docs.length, 'documents');
+      console.log('📥 Firebase returned', places.length, 'places');
 
       // Clear existing places before loading
       this.placeholders = [];
 
-      querySnapshot.docs.forEach(doc => {
-        const data = doc.data();
-        console.log('   Raw Firestore data:', data);
+      places.forEach(place => {
+        console.log('   Loading place:', place.realPlaceName, place);
 
-        // Firestore 필드명 → 앱 필드명 변환
+        // Map places-service fields to MapView fields
         const placeData = {
-          docId: doc.id,
-          latitude: data.realLat,
-          longitude: data.realLng,
-          intimacy: data.familiarity * 100, // 0-1 → 0-100
-          emotionKeywords: data.keywords || [],
-          memory: data.memory || '',
-          mandalaImage: data.mandalaImage || null,
-          name: `Place at ${data.realLat.toFixed(2)}°N`, // 임시 이름
-          // 기타 필요한 필드는 기본값 설정
+          placeId: place.placeId,
+          docId: place.placeId,
+          name: place.realPlaceName,
+          latitude: place.latitude,
+          longitude: place.longitude,
+          intimacy: place.intimacyScore,
+          emotionKeywords: place.emotionKeywords || [],
+          memory: place.memoryText || '',
+          mandalaImage: place.mandalaImage || null,
+          themeSongURL: place.themeSongURL || '',
           radius: 40,
-          glowColor: '#64FFDA',
-          themeSongURL: 'song/calm1.mp3'
+          glowColor: this.getEmotionalGlowColor(place.emotionKeywords),
+          id: place.placeId
         };
 
         this.placeholders.push(placeData);
-        this.addPlaceMarker(placeData); // Add 3D marker (왜곡된 위치에)
-        console.log(`  ✓ Loaded: ${placeData.latitude.toFixed(4)}°N, ${placeData.longitude.toFixed(4)}°E`);
+        this.addPlaceMarker(placeData);
+        console.log(`  ✓ Loaded: ${placeData.name} at ${placeData.latitude.toFixed(4)}°N, ${placeData.longitude.toFixed(4)}°E`);
       });
 
-      // 모든 장소 로드 후 그리드 업데이트
-      this.createDistortedGrid();
+      // Update PathFinder with loaded places
+      this.pathFinder.setPlaces(this.placeholders);
+
+      // Load all theme songs
+      this.audioManager.loadAllThemeSongs(this.placeholders.map(p => ({
+        placeId: p.id || p.docId,
+        themeSongURL: p.themeSongURL
+      })));
 
       console.log(`📍 ✅ Successfully loaded ${this.placeholders.length} place(s) from Firebase`);
     } catch (error) {
@@ -1414,23 +2265,40 @@ class MapView {
   }
 
   async deletePlace(place) {
-    // Remove from local array
-    this.placeholders = this.placeholders.filter(p => p.id !== place.id);
-    this.render();
-    console.log('🗑️ Place deleted from map:', place.name);
+    console.log('🗑️ Deleting place:', place.name);
 
-    // Delete from Firebase
+    // Delete from Firebase FIRST using places-service
     try {
-      const user = auth.currentUser;
-      if (user && place.docId) {
-        const placeRef = doc(db, 'users', user.uid, 'places', place.docId);
-        await deleteDoc(placeRef);
+      if (place.placeId) {
+        await removePlace(place.placeId);
         console.log('💾 Place deleted from Firebase:', place.name);
       }
     } catch (error) {
       console.error('❌ Firebase delete failed:', error);
-      showError('장소 삭제에 실패했습니다.');
+      alert('장소 삭제에 실패했습니다: ' + error.message);
+      return; // Don't remove from map if delete failed
     }
+
+    // Remove from local array
+    this.placeholders = this.placeholders.filter(p => p.id !== place.id);
+
+    // Remove 3D markers
+    if (place.marker3D) {
+      this.scene.remove(place.marker3D);
+      place.marker3D.geometry.dispose();
+      place.marker3D.material.dispose();
+    }
+    if (place.glowSprite3D) {
+      this.scene.remove(place.glowSprite3D);
+      place.glowSprite3D.geometry.dispose();
+      place.glowSprite3D.material.dispose();
+    }
+
+    // Update PathFinder
+    this.pathFinder.setPlaces(this.placeholders);
+
+    // Regenerate grid
+    this.createDistortedGrid();
   }
 
   editPlaceMandala(place) {
@@ -1850,7 +2718,7 @@ class MapView {
   }
 
   /**
-   * Start navigation
+   * Start navigation with emotional pathfinding
    */
   startNavigation(destination) {
     console.log(`🧭 Starting navigation to: ${destination.name || 'destination'}`);
@@ -1858,8 +2726,235 @@ class MapView {
     console.log(`   Intimacy: ${destination.intimacy}%`);
     console.log(`   Zone type: ${getZoneType(destination)}`);
 
-    // TODO: Implement actual pathfinding and route visualization
-    alert(`길 안내를 시작합니다!\n목적지: ${destination.name || '선택한 장소'}\n친밀도: ${destination.intimacy}%\n\n(경로 시각화 기능은 곧 추가됩니다)`);
+    // Store current destination for later use
+    this.currentDestination = destination;
+
+    // Use A* pathfinding with emotional weights
+    const pathResult = this.pathFinder.findPathAStar(
+      this.userGPS.latitude,
+      this.userGPS.longitude,
+      destination.latitude,
+      destination.longitude
+    );
+
+    if (!pathResult.valid) {
+      alert(`⚠️ 경로를 찾을 수 없습니다\n\n${pathResult.warning}`);
+
+      if (pathResult.alternative) {
+        const useAlt = confirm(`대신 "${pathResult.alternative.name}"로 안내할까요?`);
+        if (useAlt) {
+          // Find the alternative place object
+          const altPlace = this.placeholders.find(p =>
+            p.latitude === pathResult.alternative.lat &&
+            p.longitude === pathResult.alternative.lng
+          );
+          if (altPlace) {
+            this.startNavigation(altPlace);
+          }
+        }
+      }
+      return;
+    }
+
+    // Store current path
+    this.currentPath = pathResult.path;
+
+    // Visualize route on 3D sphere
+    this.visualizeRoute3D(pathResult.path, destination);
+
+    // Start audio updates
+    this.startAudioUpdates();
+
+    // Show navigation stop button
+    this.showNavigationStopButton();
+
+    console.log(`✅ Route calculated:`);
+    console.log(`   Distance: ${(pathResult.totalDistance / 1000).toFixed(2)} km`);
+    console.log(`   Emotional cost: ${pathResult.emotionalCost.toFixed(2)}`);
+    console.log(`   Waypoints: ${pathResult.path.length}`);
+
+    const distanceText = pathResult.totalDistance < 1000
+      ? `${pathResult.totalDistance.toFixed(0)}m`
+      : `${(pathResult.totalDistance / 1000).toFixed(2)}km`;
+
+    const emotionalCostText = pathResult.emotionalCost < 0.5
+      ? '✅ 매우 편안한 길'
+      : pathResult.emotionalCost < 1
+        ? '⚠️ 보통'
+        : '❌ 불편한 길';
+
+    alert(`🧭 길 안내 시작!\n\n목적지: ${destination.name || '선택한 장소'}\n실제 거리: ${distanceText}\n경유 지점: ${pathResult.path.length}개\n\n감정적 비용: ${emotionalCostText}\n\n💡 3D 지도에서 경로를 확인하세요!`);
+  }
+
+  /**
+   * Show navigation stop button
+   */
+  showNavigationStopButton() {
+    let stopBtn = document.getElementById('nav-stop-btn');
+
+    if (!stopBtn) {
+      stopBtn = document.createElement('button');
+      stopBtn.id = 'nav-stop-btn';
+      stopBtn.className = 'nav-btn';
+      stopBtn.textContent = '길 안내 종료';
+      stopBtn.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: #F44336;
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        z-index: 1000;
+        box-shadow: 0 4px 12px rgba(244, 67, 54, 0.3);
+        transition: all 0.2s;
+      `;
+      stopBtn.addEventListener('mouseenter', () => {
+        stopBtn.style.background = '#D32F2F';
+        stopBtn.style.transform = 'translateY(-2px)';
+      });
+      stopBtn.addEventListener('mouseleave', () => {
+        stopBtn.style.background = '#F44336';
+        stopBtn.style.transform = 'translateY(0)';
+      });
+      stopBtn.addEventListener('click', () => {
+        this.stopNavigation();
+      });
+
+      document.body.appendChild(stopBtn);
+    }
+
+    stopBtn.style.display = 'block';
+  }
+
+  /**
+   * Hide navigation stop button
+   */
+  hideNavigationStopButton() {
+    const stopBtn = document.getElementById('nav-stop-btn');
+    if (stopBtn) {
+      stopBtn.style.display = 'none';
+    }
+  }
+
+  /**
+   * Stop navigation
+   */
+  stopNavigation() {
+    console.log('🛑 Stopping navigation...');
+
+    // Clear route visualization
+    if (this.currentRouteLine) {
+      this.scene.remove(this.currentRouteLine);
+      this.currentRouteLine = null;
+    }
+
+    // Stop audio updates
+    this.stopAudioUpdates();
+
+    // Clear destination and path
+    this.currentDestination = null;
+    this.currentPath = null;
+
+    // Hide stop button
+    this.hideNavigationStopButton();
+
+    console.log('✅ Navigation stopped');
+    alert('길 안내가 종료되었습니다.');
+  }
+
+  /**
+   * Visualize route on 3D sphere
+   */
+  visualizeRoute3D(path, destination) {
+    // Remove previous route line
+    if (this.currentRouteLine) {
+      this.scene.remove(this.currentRouteLine);
+      this.currentRouteLine = null;
+    }
+
+    if (path.length < 2) return;
+
+    // Convert GPS path to 3D positions on sphere with warping
+    const points = path.map(point => {
+      const actualPos = this.latLonToVector3(point.lat, point.lng, 1.0);
+      const warpedPos = this.calculateDistortion3D(actualPos);
+      // Slightly above surface for visibility
+      return warpedPos.multiplyScalar(1.01);
+    });
+
+    // Create line geometry
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+
+    // Determine line color based on destination intimacy
+    const intimacy = destination.intimacy || 50;
+    let lineColor;
+    if (intimacy > 70) {
+      lineColor = 0x00FF00; // Green: welcoming
+    } else if (intimacy > 50) {
+      lineColor = 0x64FFDA; // Cyan: comfortable
+    } else if (intimacy > 30) {
+      lineColor = 0xFFEB3B; // Yellow: uncomfortable
+    } else {
+      lineColor = 0xFF0000; // Red: forbidden (shouldn't happen)
+    }
+
+    const material = new THREE.LineBasicMaterial({
+      color: lineColor,
+      linewidth: 3,
+      opacity: 0.8,
+      transparent: true
+    });
+
+    this.currentRouteLine = new THREE.Line(geometry, material);
+    this.scene.add(this.currentRouteLine);
+
+    console.log(`🗺️ Route visualized with ${points.length} waypoints`);
+  }
+
+  /**
+   * Start audio updates based on user location
+   */
+  startAudioUpdates() {
+    // Update audio every 100ms based on current location
+    if (this.audioUpdateInterval) {
+      clearInterval(this.audioUpdateInterval);
+    }
+
+    this.audioUpdateInterval = setInterval(() => {
+      const userLocation = {
+        lat: this.userGPS.latitude,
+        lng: this.userGPS.longitude
+      };
+
+      const places = this.placeholders.map(p => ({
+        placeId: p.id,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        emotionKeywords: p.emotionKeywords || [],
+        intimacyScore: p.intimacy || 50
+      }));
+
+      this.audioManager.updateAudioForLocation(userLocation, places);
+    }, 100);
+
+    console.log('🎵 Audio updates started');
+  }
+
+  /**
+   * Stop audio updates
+   */
+  stopAudioUpdates() {
+    if (this.audioUpdateInterval) {
+      clearInterval(this.audioUpdateInterval);
+      this.audioUpdateInterval = null;
+    }
+    this.audioManager.cleanup();
+    console.log('🎵 Audio updates stopped');
   }
 
   /**
@@ -2104,11 +3199,14 @@ class MapView {
 
 let mapView = null;
 
-async function initMapView() {
+async function initMapView(uid) {
   if (!mapView) {
     mapView = new MapView();
-    // Load existing places from Firebase
-    await mapView.loadPlaces();
+    if (uid) {
+      mapView.setUser(uid);
+      // Load existing places from Firebase
+      await mapView.loadPlaces();
+    }
   }
 }
 

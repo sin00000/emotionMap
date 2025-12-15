@@ -2,17 +2,42 @@ export class PathFinder {
   constructor() {
     this.forbiddenZones = [];
     this.preferredZones = [];
+    this.places = [];
   }
 
   // Set places to identify forbidden and preferred zones
   setPlaces(places) {
+    this.places = places;
+
+    // 친밀도 30 이하: 금지구역 (통과 불가)
     this.forbiddenZones = places.filter(p =>
-      p.emotionKeywords.includes('avoidance') || p.intimacyScore < 20
+      (p.intimacy !== undefined ? p.intimacy : p.intimacyScore) <= 30
     );
 
+    // 친밀도 70 이상: 환영하는 길 (최우선 선호)
     this.preferredZones = places.filter(p =>
-      p.intimacyScore > 80
+      (p.intimacy !== undefined ? p.intimacy : p.intimacyScore) > 70
     );
+
+    console.log(`🗺️ PathFinder initialized: ${this.forbiddenZones.length} forbidden, ${this.preferredZones.length} preferred zones`);
+  }
+
+  /**
+   * Get emotional weight for a place (A* heuristic)
+   * @returns {number} - Weight multiplier (0.1 = very preferred, Infinity = forbidden)
+   */
+  getEmotionalWeight(place) {
+    const intimacy = place.intimacy !== undefined ? place.intimacy : place.intimacyScore;
+
+    if (intimacy <= 30) {
+      return Infinity; // 금지구역: 통과 불가
+    } else if (intimacy <= 50) {
+      return 10.0; // 불편한 길: 높은 가중치
+    } else if (intimacy <= 70) {
+      return 0.5; // 편안한 길: 낮은 가중치
+    } else {
+      return 0.1; // 환영하는 길: 최우선 선호
+    }
   }
 
   // Check if a point is in a forbidden zone
@@ -246,5 +271,205 @@ export class PathFinder {
     return !path.some(point =>
       this.isInForbiddenZone(point.lat, point.lng)
     );
+  }
+
+  /**
+   * A* PATHFINDING WITH EMOTIONAL WEIGHTS
+   * Finds optimal path considering emotional zones
+   */
+  findPathAStar(startLat, startLng, endLat, endLng) {
+    console.log(`🧭 A* pathfinding: (${startLat.toFixed(4)}, ${startLng.toFixed(4)}) → (${endLat.toFixed(4)}, ${endLng.toFixed(4)})`);
+
+    // Check if destination is forbidden
+    if (this.isInForbiddenZone(endLat, endLng)) {
+      const alternative = this.findAlternativeDestination(startLat, startLng, endLat, endLng);
+      return {
+        valid: false,
+        warning: alternative
+          ? `"${alternative.name}"이(가) 더 가까운 목적지입니다.`
+          : '금지구역으로는 갈 수 없습니다.',
+        alternative: alternative,
+        path: []
+      };
+    }
+
+    // Create grid of waypoints (simplified A*)
+    const path = this.aStarSimplified(startLat, startLng, endLat, endLng);
+
+    if (path.length === 0) {
+      return {
+        valid: false,
+        warning: '유효한 경로를 찾을 수 없습니다.',
+        path: []
+      };
+    }
+
+    return {
+      valid: true,
+      path: path,
+      totalDistance: this.calculatePathDistance(path),
+      emotionalCost: this.calculateEmotionalCost(path)
+    };
+  }
+
+  /**
+   * Simplified A* algorithm for GPS pathfinding
+   */
+  aStarSimplified(startLat, startLng, endLat, endLng) {
+    const openSet = [];
+    const closedSet = new Set();
+    const cameFrom = new Map();
+    const gScore = new Map();
+    const fScore = new Map();
+
+    const startKey = `${startLat},${startLng}`;
+    const endKey = `${endLat},${endLng}`;
+
+    openSet.push({ lat: startLat, lng: startLng, key: startKey });
+    gScore.set(startKey, 0);
+    fScore.set(startKey, this.calculateDistance(startLat, startLng, endLat, endLng));
+
+    let iterations = 0;
+    const maxIterations = 100;
+
+    while (openSet.length > 0 && iterations < maxIterations) {
+      iterations++;
+
+      // Find node with lowest fScore
+      openSet.sort((a, b) => fScore.get(a.key) - fScore.get(b.key));
+      const current = openSet.shift();
+
+      // Reached destination
+      if (this.calculateDistance(current.lat, current.lng, endLat, endLng) < 10) {
+        return this.reconstructPath(cameFrom, endKey, current.key);
+      }
+
+      closedSet.add(current.key);
+
+      // Generate neighbors (8-directional movement)
+      const neighbors = this.getNeighbors(current.lat, current.lng, endLat, endLng);
+
+      for (const neighbor of neighbors) {
+        const neighborKey = `${neighbor.lat},${neighbor.lng}`;
+
+        if (closedSet.has(neighborKey)) continue;
+
+        // Check if neighbor is in forbidden zone
+        if (this.isInForbiddenZone(neighbor.lat, neighbor.lng)) {
+          continue; // Skip forbidden zones
+        }
+
+        // Calculate tentative gScore
+        const distance = this.calculateDistance(current.lat, current.lng, neighbor.lat, neighbor.lng);
+        const emotionalWeight = this.getEmotionalWeightForPoint(neighbor.lat, neighbor.lng);
+        const tentativeGScore = (gScore.get(current.key) || Infinity) + distance * emotionalWeight;
+
+        if (tentativeGScore < (gScore.get(neighborKey) || Infinity)) {
+          // This path is better
+          cameFrom.set(neighborKey, current.key);
+          gScore.set(neighborKey, tentativeGScore);
+          fScore.set(neighborKey, tentativeGScore + this.calculateDistance(neighbor.lat, neighbor.lng, endLat, endLng));
+
+          if (!openSet.find(n => n.key === neighborKey)) {
+            openSet.push(neighbor);
+          }
+        }
+      }
+    }
+
+    // No path found, return direct line (if no forbidden zones)
+    return this.calculateAvoidancePath(startLat, startLng, endLat, endLng);
+  }
+
+  /**
+   * Get neighbors for A* (8 directions)
+   */
+  getNeighbors(lat, lng, targetLat, targetLng) {
+    const stepSize = 0.001; // ~111 meters
+    const neighbors = [];
+
+    // 8 directions
+    const directions = [
+      { lat: stepSize, lng: 0 },
+      { lat: -stepSize, lng: 0 },
+      { lat: 0, lng: stepSize },
+      { lat: 0, lng: -stepSize },
+      { lat: stepSize, lng: stepSize },
+      { lat: stepSize, lng: -stepSize },
+      { lat: -stepSize, lng: stepSize },
+      { lat: -stepSize, lng: -stepSize }
+    ];
+
+    for (const dir of directions) {
+      neighbors.push({
+        lat: lat + dir.lat,
+        lng: lng + dir.lng,
+        key: `${lat + dir.lat},${lng + dir.lng}`
+      });
+    }
+
+    return neighbors;
+  }
+
+  /**
+   * Get emotional weight for a GPS point (influenced by nearby places)
+   */
+  getEmotionalWeightForPoint(lat, lng) {
+    let minWeight = 1.0; // Default neutral weight
+
+    for (const place of this.places) {
+      const distance = this.calculateDistance(lat, lng, place.latitude, place.longitude);
+
+      // If within influence radius (100m)
+      if (distance < 100) {
+        const weight = this.getEmotionalWeight(place);
+        minWeight = Math.min(minWeight, weight); // Use lowest (best) weight
+      }
+    }
+
+    return minWeight;
+  }
+
+  /**
+   * Reconstruct path from A* cameFrom map
+   */
+  reconstructPath(cameFrom, endKey, currentKey) {
+    const path = [];
+    let current = currentKey;
+
+    while (cameFrom.has(current)) {
+      const [lat, lng] = current.split(',').map(parseFloat);
+      path.unshift({ lat, lng });
+      current = cameFrom.get(current);
+    }
+
+    // Add start point
+    const [startLat, startLng] = current.split(',').map(parseFloat);
+    path.unshift({ lat: startLat, lng: startLng });
+
+    console.log(`✅ Path found with ${path.length} waypoints`);
+    return path;
+  }
+
+  /**
+   * Calculate total path distance
+   */
+  calculatePathDistance(path) {
+    let total = 0;
+    for (let i = 1; i < path.length; i++) {
+      total += this.calculateDistance(path[i-1].lat, path[i-1].lng, path[i].lat, path[i].lng);
+    }
+    return total;
+  }
+
+  /**
+   * Calculate emotional cost of path
+   */
+  calculateEmotionalCost(path) {
+    let cost = 0;
+    for (const point of path) {
+      cost += this.getEmotionalWeightForPoint(point.lat, point.lng);
+    }
+    return cost / path.length; // Average emotional weight
   }
 }

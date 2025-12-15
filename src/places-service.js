@@ -57,6 +57,7 @@ export async function addPlace(placeData) {
     emotionKeywords: placeData.emotionKeywords,
     memoryText: placeData.memoryText || '',
     themeSongURL: placeData.themeSongURL || '',
+    mandalaImage: placeData.mandalaImage || null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };

@@ -9,8 +9,8 @@ export class MandalaCreator {
     this.ctx = this.canvas.getContext('2d');
     this.previewCtx = this.preview ? this.preview.getContext('2d') : null;
 
-    // Set canvas size (square)
-    this.size = 400;
+    // Set canvas size (square) - larger to prevent clipping
+    this.size = 500;
     this.canvas.width = this.size;
     this.canvas.height = this.size;
 
@@ -55,9 +55,9 @@ export class MandalaCreator {
 
     const centerX = this.size / 2;
     const centerY = this.size / 2;
-    const radius = this.size / 2.5;
+    const radius = this.size / 2; // Perfect circular mandala filling entire canvas
 
-    // Draw 8 quadrants as pie slices
+    // Draw 8 quadrants as pie slices (no borders)
     for (let i = 0; i < this.quadrants; i++) {
       const startAngle = (i * Math.PI * 2) / this.quadrants;
       const endAngle = ((i + 1) * Math.PI * 2) / this.quadrants;
@@ -68,21 +68,15 @@ export class MandalaCreator {
       this.ctx.closePath();
       this.ctx.fillStyle = this.quadrantColors[i];
       this.ctx.fill();
-
-      // Draw border
-      this.ctx.strokeStyle = '#333333';
-      this.ctx.lineWidth = 2;
-      this.ctx.stroke();
+      // No stroke/border
     }
 
-    // Draw center circle
+    // Draw center circle (no border)
     this.ctx.beginPath();
     this.ctx.arc(centerX, centerY, radius * 0.15, 0, Math.PI * 2);
     this.ctx.fillStyle = '#FFFFFF';
     this.ctx.fill();
-    this.ctx.strokeStyle = '#333333';
-    this.ctx.lineWidth = 2;
-    this.ctx.stroke();
+    // No stroke/border
 
     // Update preview if exists
     if (this.previewCtx) {
@@ -118,7 +112,7 @@ export class MandalaCreator {
 
     // Check if click is within the mandala radius
     const distance = Math.sqrt(dx * dx + dy * dy);
-    const radius = this.size / 2.5;
+    const radius = this.size / 2;
 
     if (distance > radius * 0.15 && distance < radius) {
       return quadrant;
