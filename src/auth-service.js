@@ -40,24 +40,40 @@ export async function createAccount(nickname, code) {
 
   try {
     // 1. Create the user with Firebase Auth
+    console.log('🔐 Step 1: Creating Firebase Auth user...');
     const userCredential = await createUserWithEmailAndPassword(auth, email, code);
     const user = userCredential.user;
+    console.log('✅ Step 1 SUCCESS: Auth user created with UID:', user.uid);
 
     // 2. Create user document in Firestore (users/{uid})
-    await setDoc(doc(db, 'users', user.uid), {
-      uid: user.uid,
-      nickname: trimmedNickname,
-      codeHash: hashedCode,
-      mandalaGraphicURL: '',
-      createdAt: now,
-      updatedAt: now // 규칙에 맞게 updatedAt 추가 (필수 아님, 권장)
-    });
+    console.log('📝 Step 2: Creating Firestore user document...');
+    try {
+      await setDoc(doc(db, 'users', user.uid), {
+        uid: user.uid,
+        nickname: trimmedNickname,
+        codeHash: hashedCode,
+        mandalaGraphicURL: '',
+        createdAt: now,
+        updatedAt: now // 규칙에 맞게 updatedAt 추가 (필수 아님, 권장)
+      });
+      console.log('✅ Step 2 SUCCESS: User document created');
+    } catch (firestoreError) {
+      console.error('❌ Step 2 FAILED: Firestore user document error:', firestoreError.code, firestoreError.message);
+      throw firestoreError;
+    }
 
     // 3. ✨ 추가: Nickname document for uniqueness and security rules (nicknames/{nickname})
-    await setDoc(doc(db, 'nicknames', trimmedNickname), {
-      uid: user.uid,
-      createdAt: now,
-    });
+    console.log('📝 Step 3: Creating nickname document...');
+    try {
+      await setDoc(doc(db, 'nicknames', trimmedNickname), {
+        uid: user.uid,
+        createdAt: now,
+      });
+      console.log('✅ Step 3 SUCCESS: Nickname document created');
+    } catch (nicknameError) {
+      console.error('❌ Step 3 FAILED: Nickname document error:', nicknameError.code, nicknameError.message);
+      throw nicknameError;
+    }
 
 
     return {
