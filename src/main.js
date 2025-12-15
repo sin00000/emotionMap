@@ -43,6 +43,16 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 console.log('🎨 Emotional Map - Step 5: Place Search & Final UX Flow initialized');
+console.log('🔥 Firebase App initialized:', app.name);
+console.log('🔥 Firebase Auth domain:', auth.config.authDomain);
+console.log('🔥 Firebase Firestore:', db.type);
+
+// Test Firebase connectivity
+window.addEventListener('load', () => {
+  console.log('🌐 Testing Firebase connectivity...');
+  console.log('   Auth state:', auth.currentUser ? 'Logged in' : 'Not logged in');
+  console.log('   Project ID:', firebaseConfig.projectId);
+});
 
 // ===================================================
 // UTILITY FUNCTIONS
@@ -64,6 +74,90 @@ function showError(message) {
     errorEl.textContent = message;
     setTimeout(() => errorEl.textContent = '', 4000);
   }
+}
+
+// ===================================================
+// INTIMACY-BASED NAVIGATION SYSTEM
+// ===================================================
+
+/**
+ * 친밀도 기반 구역 타입 판별
+ * @param {Object} place - 장소 데이터
+ * @returns {string} - 'forbidden' | 'uncomfortable' | 'comfortable' | 'welcoming'
+ */
+function getZoneType(place) {
+  const intimacy = place.intimacy || 0;
+
+  if (intimacy <= 30) {
+    return 'forbidden'; // 금지구역: 통과 불가
+  } else if (intimacy <= 50) {
+    return 'uncomfortable'; // 불편한 길: 가중치 높음
+  } else if (intimacy <= 70) {
+    return 'comfortable'; // 편안한 길: 가중치 낮음
+  } else {
+    return 'welcoming'; // 환영하는 길: 새로운 경로 생성
+  }
+}
+
+/**
+ * 장소가 금지구역인지 확인
+ */
+function isForbiddenZone(place) {
+  return getZoneType(place) === 'forbidden';
+}
+
+/**
+ * 친밀도 기반 경로 가중치 계산
+ * @param {Object} place - 장소 데이터
+ * @returns {number} - 경로 가중치 (낮을수록 선호)
+ */
+function getPathWeight(place) {
+  const zoneType = getZoneType(place);
+
+  switch(zoneType) {
+    case 'forbidden':
+      return Infinity; // 절대 통과 불가
+    case 'uncomfortable':
+      return 10.0; // 매우 높은 가중치 (회피)
+    case 'comfortable':
+      return 0.5; // 낮은 가중치 (선호)
+    case 'welcoming':
+      return 0.1; // 매우 낮은 가중치 (최우선 선호)
+    default:
+      return 1.0;
+  }
+}
+
+/**
+ * 목적지가 도달 가능한지 확인
+ * @param {Object} destination - 목적지 장소
+ * @param {Array} places - 모든 장소 목록
+ * @returns {Object} - { reachable: boolean, reason: string, alternative: Object }
+ */
+function checkDestinationReachability(destination, places) {
+  // 목적지 자체가 금지구역인 경우
+  if (isForbiddenZone(destination)) {
+    // 더 가까운 좋아하는 장소 찾기
+    const welcomingPlaces = places
+      .filter(p => getZoneType(p) === 'welcoming' || getZoneType(p) === 'comfortable')
+      .sort((a, b) => b.intimacy - a.intimacy);
+
+    const alternative = welcomingPlaces[0];
+
+    return {
+      reachable: false,
+      reason: `지금 상태로는 "${destination.name || '선택한 목적지'}"보다 "${alternative?.name || '다른 장소'}"이 더 가까운 목적지입니다.`,
+      alternative: alternative
+    };
+  }
+
+  // TODO: 경로 상에 금지구역이 있어서 도달 불가능한 경우도 체크
+
+  return {
+    reachable: true,
+    reason: null,
+    alternative: null
+  };
 }
 
 async function hashCode(code) {
@@ -219,11 +313,6 @@ async function searchRealPlaces(query) {
 // ===================================================
 // HELPER FUNCTIONS FOR EMOTIONAL LOGIC
 // ===================================================
-
-// Check if a place is a Forbidden Zone (low intimacy or 'avoidance' keyword)
-function isForbiddenZone(place) {
-  return place.intimacy < 20 || (place.emotionKeywords && place.emotionKeywords.includes('avoidance'));
-}
 
 // Check proximity to forbidden zones for BGM muting
 function checkMuteZone(userX, userY, places, muteRadius = 150) {
@@ -840,23 +929,23 @@ class MapView {
         // 방향 벡터 정규화
         const direction = toPlace.clone().normalize();
 
-        // 친밀도 효과 (극적으로 강화)
+        // 친밀도 효과 (매우 극단적으로 강화)
         const intimacyNormalized = place.intimacy / 100; // 0 to 1
 
-        // 극적인 지수 사용: I^4 (사용자 요청: 5배 이상 강화)
-        const intimacyPower = Math.pow(intimacyNormalized, 4);
+        // 초극적인 지수 사용: I^6 (만다라 배치와 동일)
+        const intimacyPower = Math.pow(intimacyNormalized, 6);
 
         // 거리 감쇠 (가까울수록 강한 영향)
         const falloff = 1 - (distance / influenceRadius);
-        const strength = Math.pow(falloff, 2);
+        const strength = Math.pow(falloff, 1.5);
 
-        // 끌어당김/밀어냄 계산
-        // Intimacy 100% → +2.0 (강하게 압축)
-        // Intimacy 0% → -2.0 (강하게 팽창)
-        const attractionFactor = (intimacyPower - 0.5) * 4; // -2.0 to +2.0
+        // 끌어당김/밀어냄 계산 (매우 극단적)
+        // Intimacy 100% → +4.0 (매우 강하게 압축)
+        // Intimacy 0% → -4.0 (매우 강하게 팽창)
+        const attractionFactor = (intimacyPower - 0.5) * 8; // -4.0 to +4.0
 
-        // 최종 변위 (극적으로 강화된 효과)
-        const displacementMagnitude = attractionFactor * strength * 0.3; // 최대 0.3 (구 반지름의 30%)
+        // 최종 변위 (초극적 효과)
+        const displacementMagnitude = attractionFactor * strength * 0.5; // 최대 0.5 (구 반지름의 50%)
 
         totalDisplacement.add(direction.multiplyScalar(displacementMagnitude));
       }
@@ -1084,14 +1173,15 @@ class MapView {
     const toPlace = originalPosition.clone().sub(userPos);
     const distance = toPlace.length();
 
-    // 친밀도 기반 거리 왜곡 (극적으로)
+    // 친밀도 기반 거리 왜곡 (매우 극단적으로)
     const intimacyNormalized = placeData.intimacy / 100;
-    const intimacyPower = Math.pow(intimacyNormalized, 4); // I^4 (극적 효과)
+    const intimacyPower = Math.pow(intimacyNormalized, 6); // I^6 (초극적 효과)
 
-    // 왜곡 계수: 친밀도가 높으면 가까이, 낮으면 멀리
-    // Intimacy 100% → 0.3 (실제 거리의 30%로 압축)
-    // Intimacy 0% → 3.0 (실제 거리의 300%로 팽창)
-    const distortionFactor = 0.3 + (1 - intimacyPower) * 2.7;
+    // 왜곡 계수: 친밀도가 높으면 매우 가까이, 낮으면 매우 멀리
+    // Intimacy 100% → 0.05 (실제 거리의 5%로 초압축)
+    // Intimacy 50% → 5.0 (실제 거리의 500%)
+    // Intimacy 0% → 10.0 (실제 거리의 1000%로 초팽창)
+    const distortionFactor = 0.05 + (1 - intimacyPower) * 9.95;
 
     const distortedDistance = distance * distortionFactor;
     const direction = toPlace.normalize();
@@ -1138,7 +1228,9 @@ class MapView {
     // Store reference for later removal/updates
     placeData.marker3D = sprite;
 
-    console.log(`📍 Added marker: intimacy ${placeData.intimacy}% → distance factor ${distortionFactor.toFixed(2)}x`);
+    console.log(`📍 Added marker at ${placeData.latitude.toFixed(2)}°N`);
+    console.log(`   Intimacy: ${placeData.intimacy}% → Distance factor: ${distortionFactor.toFixed(2)}x`);
+    console.log(`   ${placeData.intimacy >= 70 ? '🔴 VERY CLOSE' : placeData.intimacy >= 40 ? '🟡 MODERATE' : '🔵 VERY FAR'}`);
   }
 
   async updatePlace(placeData) {
@@ -1527,9 +1619,9 @@ class MapView {
       console.log('👋 Signed out');
     });
 
-    // Navigation (placeholder)
+    // Navigation
     document.getElementById('nav-btn').addEventListener('click', () => {
-      alert('Navigation feature - Coming soon!');
+      this.showNavigationModal();
     });
 
     // Add place - show modal with search + data input
@@ -1551,6 +1643,223 @@ class MapView {
     // Setup modals
     this.setupSearchPlaceModal();
     this.setupAddPlaceModal();
+    this.setupNavigationModal();
+  }
+
+  /**
+   * Show navigation modal
+   */
+  showNavigationModal() {
+    const modal = document.getElementById('navigation-modal');
+    const select = document.getElementById('destination-select');
+
+    // Clear and populate destination options
+    select.innerHTML = '<option value="">목적지를 선택하세요...</option>';
+
+    this.placeholders.forEach((place, index) => {
+      const option = document.createElement('option');
+      option.value = index;
+      option.textContent = place.name || `Place ${index + 1}`;
+      select.appendChild(option);
+    });
+
+    if (this.placeholders.length === 0) {
+      select.innerHTML = '<option value="">장소를 먼저 추가하세요...</option>';
+      select.disabled = true;
+    } else {
+      select.disabled = false;
+    }
+
+    // Reset UI
+    document.getElementById('zone-info').classList.add('hidden');
+    document.getElementById('reachability-warning').classList.add('hidden');
+    document.getElementById('route-preview').classList.add('hidden');
+    document.getElementById('navigation-start-btn').disabled = true;
+
+    modal.classList.remove('hidden');
+    console.log('🗺️ Navigation modal opened');
+  }
+
+  /**
+   * Setup navigation modal interactions
+   */
+  setupNavigationModal() {
+    const modal = document.getElementById('navigation-modal');
+    const select = document.getElementById('destination-select');
+    const closeBtn = document.getElementById('navigation-close-btn');
+    const cancelBtn = document.getElementById('navigation-cancel-btn');
+    const startBtn = document.getElementById('navigation-start-btn');
+    const alternativeBtn = document.getElementById('alternative-destination-btn');
+
+    // Close handlers
+    const closeModal = () => {
+      modal.classList.add('hidden');
+      this.selectedDestination = null;
+    };
+
+    closeBtn.addEventListener('click', closeModal);
+    cancelBtn.addEventListener('click', closeModal);
+
+    // Destination selection
+    select.addEventListener('change', () => {
+      const index = parseInt(select.value);
+      if (isNaN(index)) {
+        document.getElementById('zone-info').classList.add('hidden');
+        document.getElementById('reachability-warning').classList.add('hidden');
+        document.getElementById('route-preview').classList.add('hidden');
+        startBtn.disabled = true;
+        return;
+      }
+
+      const destination = this.placeholders[index];
+      this.selectedDestination = destination;
+
+      // Show zone info
+      this.showZoneInfo(destination);
+
+      // Check reachability
+      const reachability = checkDestinationReachability(destination, this.placeholders);
+      this.showReachabilityInfo(reachability);
+
+      // Show route preview if reachable
+      if (reachability.reachable) {
+        this.showRoutePreview(destination);
+        startBtn.disabled = false;
+      } else {
+        document.getElementById('route-preview').classList.add('hidden');
+        startBtn.disabled = true;
+      }
+    });
+
+    // Alternative destination button
+    alternativeBtn.addEventListener('click', () => {
+      const index = select.querySelector(`option[value="${this.placeholders.indexOf(this.alternative)}"]`);
+      if (index) {
+        select.value = this.placeholders.indexOf(this.alternative);
+        select.dispatchEvent(new Event('change'));
+      }
+    });
+
+    // Start navigation
+    startBtn.addEventListener('click', () => {
+      if (this.selectedDestination) {
+        this.startNavigation(this.selectedDestination);
+        closeModal();
+      }
+    });
+  }
+
+  /**
+   * Show zone type information
+   */
+  showZoneInfo(place) {
+    const zoneInfo = document.getElementById('zone-info');
+    const badge = zoneInfo.querySelector('.zone-badge');
+    const description = zoneInfo.querySelector('.zone-description');
+
+    const zoneType = getZoneType(place);
+
+    // Clear previous classes
+    zoneInfo.className = 'nav-section zone-info';
+    zoneInfo.classList.add(zoneType);
+
+    // Set badge text and description
+    const zoneTexts = {
+      forbidden: {
+        badge: '🚫 금지구역',
+        description: '친밀도가 매우 낮아 통과할 수 없습니다. 이 장소로는 갈 수 없습니다.'
+      },
+      uncomfortable: {
+        badge: '⚠️ 불편한 길',
+        description: '친밀도가 낮아 경로에 높은 가중치가 적용됩니다. 가능하면 회피하는 길을 안내합니다.'
+      },
+      comfortable: {
+        badge: '✓ 편안한 길',
+        description: '적당한 친밀도로 경로에 낮은 가중치가 적용됩니다. 선호되는 길입니다.'
+      },
+      welcoming: {
+        badge: '💚 환영하는 길',
+        description: '친밀도가 매우 높아 새로운 경로가 생성됩니다. 최우선으로 안내되는 길입니다.'
+      }
+    };
+
+    badge.textContent = zoneTexts[zoneType].badge;
+    description.textContent = zoneTexts[zoneType].description;
+
+    zoneInfo.classList.remove('hidden');
+  }
+
+  /**
+   * Show reachability warning
+   */
+  showReachabilityInfo(reachability) {
+    const warning = document.getElementById('reachability-warning');
+    const message = warning.querySelector('.warning-message');
+    const altBtn = document.getElementById('alternative-destination-btn');
+
+    if (!reachability.reachable) {
+      message.textContent = reachability.reason;
+      warning.classList.remove('hidden');
+
+      if (reachability.alternative) {
+        this.alternative = reachability.alternative;
+        altBtn.classList.remove('hidden');
+      } else {
+        altBtn.classList.add('hidden');
+      }
+    } else {
+      warning.classList.add('hidden');
+    }
+  }
+
+  /**
+   * Show route preview
+   */
+  showRoutePreview(destination) {
+    const preview = document.getElementById('route-preview');
+
+    // Calculate actual distance
+    const actualDist = this.calculateGPSDistance(
+      this.userGPS.latitude,
+      this.userGPS.longitude,
+      destination.latitude,
+      destination.longitude
+    );
+
+    // Calculate emotional distance (using distortion)
+    const intimacyNormalized = destination.intimacy / 100;
+    const intimacyPower = Math.pow(intimacyNormalized, 6);
+    const distortionFactor = 0.05 + (1 - intimacyPower) * 9.95;
+    const emotionalDist = actualDist * distortionFactor;
+
+    // Update stats
+    document.getElementById('actual-distance').textContent =
+      actualDist < 1000 ? `${actualDist.toFixed(0)}m` : `${(actualDist/1000).toFixed(1)}km`;
+
+    document.getElementById('emotional-distance').textContent =
+      emotionalDist < 1000 ? `${emotionalDist.toFixed(0)}m` : `${(emotionalDist/1000).toFixed(1)}km`;
+
+    // Count waypoints (simplified - just show comfortable/welcoming places)
+    const waypoints = this.placeholders.filter(p =>
+      getZoneType(p) === 'comfortable' || getZoneType(p) === 'welcoming'
+    ).length;
+
+    document.getElementById('waypoint-count').textContent = `${waypoints}개`;
+
+    preview.classList.remove('hidden');
+  }
+
+  /**
+   * Start navigation
+   */
+  startNavigation(destination) {
+    console.log(`🧭 Starting navigation to: ${destination.name || 'destination'}`);
+    console.log(`   Destination: ${destination.latitude.toFixed(4)}°N, ${destination.longitude.toFixed(4)}°E`);
+    console.log(`   Intimacy: ${destination.intimacy}%`);
+    console.log(`   Zone type: ${getZoneType(destination)}`);
+
+    // TODO: Implement actual pathfinding and route visualization
+    alert(`길 안내를 시작합니다!\n목적지: ${destination.name || '선택한 장소'}\n친밀도: ${destination.intimacy}%\n\n(경로 시각화 기능은 곧 추가됩니다)`);
   }
 
   /**

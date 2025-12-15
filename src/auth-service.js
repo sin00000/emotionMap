@@ -28,36 +28,50 @@ export async function createAccount(nickname, code) {
     throw new Error('Nickname must be at least 2 characters long');
   }
 
+  // 1. ⚠️ 수정: 4 digits -> 6 digits
   if (!/^\d{6}$/.test(code)) {
-    throw new Error('Code must be exactly 4 digits');
+    throw new Error('Code must be exactly 6 digits');
   }
 
-  const email = nicknameToEmail(nickname);
+  const trimmedNickname = nickname.trim();
+  const email = nicknameToEmail(trimmedNickname);
   const hashedCode = await hashCode(code);
+  const now = new Date().toISOString();
 
   try {
-    // Create the user with Firebase Auth
+    // 1. Create the user with Firebase Auth
     const userCredential = await createUserWithEmailAndPassword(auth, email, code);
     const user = userCredential.user;
 
-    // Create user document in Firestore
+    // 2. Create user document in Firestore (users/{uid})
     await setDoc(doc(db, 'users', user.uid), {
       uid: user.uid,
-      nickname: nickname.trim(),
+      nickname: trimmedNickname,
       codeHash: hashedCode,
       mandalaGraphicURL: '',
-      createdAt: new Date().toISOString()
+      createdAt: now,
+      updatedAt: now // 규칙에 맞게 updatedAt 추가 (필수 아님, 권장)
     });
+
+    // 3. ✨ 추가: Nickname document for uniqueness and security rules (nicknames/{nickname})
+    await setDoc(doc(db, 'nicknames', trimmedNickname), {
+      uid: user.uid,
+      createdAt: now,
+    });
+
 
     return {
       success: true,
       user: user,
-      nickname: nickname.trim()
+      nickname: trimmedNickname
     };
   } catch (error) {
+    // 닉네임 중복 처리: auth/email-already-in-use 에러는 곧 닉네임 중복을 의미합니다.
     if (error.code === 'auth/email-already-in-use') {
       throw new Error('This nickname is already taken');
     }
+    // 다른 모든 에러는 그대로 던져서 콘솔에서 확인 가능하게 함
+    console.error("Account creation failed:", error.code, error.message);
     throw error;
   }
 }
@@ -68,8 +82,9 @@ export async function signIn(nickname, code) {
     throw new Error('Nickname and code are required');
   }
 
+  // 1. ⚠️ 수정: 4 digits -> 6 digits
   if (!/^\d{6}$/.test(code)) {
-    throw new Error('Code must be exactly 4 digits');
+    throw new Error('Code must be exactly 6 digits');
   }
 
   const email = nicknameToEmail(nickname);
@@ -80,7 +95,8 @@ export async function signIn(nickname, code) {
     // Verify user exists in Firestore
     const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
     if (!userDoc.exists()) {
-      throw new Error('User data not found');
+      // Auth 성공했으나 Firestore 문서가 없는 경우 (데이터 불일치)
+      throw new Error('User data not found in database. Please contact support.');
     }
 
     return {
@@ -89,9 +105,12 @@ export async function signIn(nickname, code) {
       userData: userDoc.data()
     };
   } catch (error) {
+    // 잘못된 자격 증명 처리
     if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
       throw new Error('Invalid nickname or code');
     }
+    // 다른 모든 에러는 그대로 던져서 콘솔에서 확인 가능하게 함
+    console.error("Sign in failed:", error.code, error.message);
     throw error;
   }
 }
