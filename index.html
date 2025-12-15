@@ -61,6 +61,7 @@
         <!-- Top Navigation Bar -->
         <div class="map-nav-bar">
             <button id="nav-btn" class="nav-btn">Navigation</button>
+            <button id="memory-overlay-btn" class="nav-btn">지도 기록</button>
             <button id="signout-btn" class="nav-btn">Sign out</button>
         </div>
 
@@ -79,7 +80,13 @@
                 <button class="bubble-close" id="bubble-close-btn">×</button>
                 <h3 id="bubble-place-name"></h3>
                 <p id="bubble-memory-text"></p>
+                <div id="bubble-mandala-container" class="bubble-mandala">
+                    <img id="bubble-mandala-img" src="" alt="Mandala" />
+                </div>
             </div>
+
+            <!-- Memory Overlay Container (Hidden by default) -->
+            <div id="memory-overlay-container" class="hidden"></div>
         </div>
 
         <!-- Bottom Action Button -->

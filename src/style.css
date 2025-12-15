@@ -361,6 +361,19 @@ body {
     font-size: 0.95rem;
 }
 
+.bubble-mandala {
+    margin-top: 1rem;
+    text-align: center;
+}
+
+.bubble-mandala img {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #e0e0e0;
+}
+
 .bubble-close {
     position: absolute;
     top: 0.75rem;
@@ -424,6 +437,63 @@ body {
 .bubble-close:hover {
     background: #e0e0e0;
     color: #0a0a0a;
+}
+
+/* Memory Overlay */
+#memory-overlay-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 50;
+}
+
+.place-memory-card {
+    position: absolute;
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 12px;
+    padding: 1rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    pointer-events: auto;
+    max-width: 200px;
+    transform: translate(-50%, -50%);
+    transition: all 0.3s ease;
+}
+
+.place-memory-card:hover {
+    transform: translate(-50%, -50%) scale(1.05);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+    z-index: 100;
+}
+
+.place-card-mandala {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #e0e0e0;
+    margin: 0 auto 0.5rem;
+    display: block;
+}
+
+.place-card-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #0a0a0a;
+    margin: 0 0 0.5rem;
+    text-align: center;
+}
+
+.place-card-memory {
+    font-size: 0.8rem;
+    color: #616161;
+    line-height: 1.4;
+    margin: 0;
+    text-align: center;
+    max-height: 80px;
+    overflow-y: auto;
 }
 
 /* Bottom Action Bar */

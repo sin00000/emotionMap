@@ -820,6 +820,7 @@ class MapView {
     this.selectedPlaceholder = null;
     this.longPressTimer = null;
     this.longPressDuration = 2000;
+    this.memoryOverlayVisible = false;
 
     // User ID (uid 명시적 관리)
     this.currentUserId = null;
@@ -839,6 +840,8 @@ class MapView {
     this.gpsWatchId = null;
     this.isGPSActive = false;
     this.lastGPSUpdate = null;
+    this.hasShownGPSSuccess = false;
+    this.hasShownGPSError = false;
 
     // 3D Setup
     this.scene = new THREE.Scene();
@@ -1074,23 +1077,38 @@ class MapView {
       (error) => {
         // Error callback
         console.error('❌ GPS Error:', error.message);
-        this.isGPSActive = false;
 
         let errorMessage = 'GPS 위치를 가져올 수 없습니다.';
+        let shouldShowMessage = false;
 
         switch(error.code) {
           case error.PERMISSION_DENIED:
             errorMessage = 'GPS 권한이 거부되었습니다. 브라우저 설정에서 위치 권한을 허용해주세요.';
+            shouldShowMessage = true;
+            this.isGPSActive = false;
+            // Stop watching on permission denied
+            if (this.gpsWatchId !== null) {
+              navigator.geolocation.clearWatch(this.gpsWatchId);
+              this.gpsWatchId = null;
+            }
             break;
           case error.POSITION_UNAVAILABLE:
             errorMessage = 'GPS 위치를 사용할 수 없습니다.';
+            shouldShowMessage = !this.hasShownGPSError; // Show once
+            this.hasShownGPSError = true;
+            this.isGPSActive = false;
             break;
           case error.TIMEOUT:
-            errorMessage = 'GPS 요청 시간이 초과되었습니다.';
+            // Timeout is common - don't show message, just retry silently
+            console.log('⏱️ GPS timeout - will retry automatically');
+            shouldShowMessage = false;
             break;
         }
 
-        this.showGPSStatus(errorMessage, false);
+        if (shouldShowMessage) {
+          this.showGPSStatus(errorMessage, false);
+        }
+
         console.log('📍 Using default location (Seoul): 37.5665°N, 126.9780°E');
       },
       {
@@ -1654,6 +1672,11 @@ class MapView {
       this.sphereUniforms.uTime.value += 0.01;
     }
 
+    // Update memory overlay positions if visible
+    if (this.memoryOverlayVisible) {
+      this.updateMemoryOverlay();
+    }
+
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -1820,14 +1843,17 @@ class MapView {
       'calm': '#87CEEB',
       'excitement': '#FF4500', // 주황
       'energy': '#FF4500',
+      'impulse': '#FF4500',    // 주황 (충동)
       'sadness': '#4169E1',    // 로얄 블루
       'melancholy': '#4169E1',
       'anger': '#DC143C',      // 진홍
       'frustration': '#DC143C',
+      'tension': '#DC143C',    // 진홍 (긴장)
       'fear': '#9370DB',       // 보라
       'anxiety': '#9370DB',
       'disgust': '#8B4513',    // 갈색
-      'avoidance': '#696969',  // 회색
+      'avoidance': '#FFEB3B',  // 노랑 (회피)
+      'emptiness': '#696969',  // 회색 (공허)
       'nostalgia': '#DDA0DD',  // 자주
       'longing': '#DDA0DD',
       'gratitude': '#00FA9A',  // 민트
@@ -1855,42 +1881,48 @@ class MapView {
     // 친밀도 (0~1)
     const intimacy = placeData.intimacy / 100.0;
 
-    // === 배치 위치 계산 (사용자 기준 거리 조정) ===
+    // === 배치 위치 계산 (친밀도 = 거리, 방향 = 랜덤) ===
     const userNormal = this.latLonToVector3(this.userGPS.latitude, this.userGPS.longitude, 1).normalize();
-    const realNormal = this.latLonToVector3(placeData.latitude, placeData.longitude, 1).normalize();
 
-    // 실제 각도 거리 (clamp로 안전하게)
-    const dot = THREE.MathUtils.clamp(userNormal.dot(realNormal), -1, 1);
-    const actualAngle = Math.acos(dot);
-
-    // 친밀도 기반 목표 각도 (실제 각도 기준으로 보정)
-    const near = Math.max(actualAngle * 0.2, Math.PI * 0.05); // 가까운 한계 (18도 이상)
-    const far = Math.min(actualAngle * 1.6, Math.PI * 0.85); // 먼 한계 (153도 이하)
+    // 1. 친밀도 기반 거리(각도) 결정
+    const near = Math.PI * 0.1;  // 최소 거리 (약 18도) - 친밀도 높음
+    const far = Math.PI * 0.7;   // 최대 거리 (약 126도) - 친밀도 낮음
     const targetAngle = far + (near - far) * intimacy;
 
-    // 방향은 유지, 거리만 조정
-    let normal;
-    if (actualAngle < 0.001) {
-      // 사용자와 장소가 거의 같은 위치일 때
-      normal = realNormal.clone();
-    } else {
-      // 회전축 계산 (antipodal 처리)
-      let axis = new THREE.Vector3().crossVectors(userNormal, realNormal);
+    // 2. 장소 좌표를 시드로 한 deterministic random 방향
+    // (같은 장소는 항상 같은 위치에 표시되도록)
+    // 더 나은 해시 함수로 균일한 분포 생성
+    const hashCoord = (x, y) => {
+      // 정수 해시 함수 (균일 분포)
+      let h = Math.floor(x * 100000) * 73856093;
+      h ^= Math.floor(y * 100000) * 19349663;
+      h ^= (h >> 13);
+      h ^= (h << 7);
+      h ^= (h >> 17);
+      return Math.abs(h) / 2147483647; // 0~1로 정규화
+    };
 
-      // 거의 평행/반평행일 때 (cross product가 거의 0)
-      if (axis.lengthSq() < 1e-8) {
-        // 임의의 수직축 생성
-        axis = new THREE.Vector3(1, 0, 0).cross(userNormal);
-        if (axis.lengthSq() < 1e-8) {
-          axis = new THREE.Vector3(0, 1, 0).cross(userNormal);
-        }
-      }
-      axis.normalize();
+    const pseudoRandom = hashCoord(placeData.latitude, placeData.longitude);
+    const randomAngle = pseudoRandom * Math.PI * 2; // 0~2π
 
-      // 목표 각도만큼 회전
-      const quaternion = new THREE.Quaternion().setFromAxisAngle(axis, targetAngle);
-      normal = userNormal.clone().applyQuaternion(quaternion).normalize();
+    // 3. userNormal에 수직인 두 개의 직교 벡터 생성
+    let tangent1 = new THREE.Vector3(1, 0, 0).cross(userNormal);
+    if (tangent1.lengthSq() < 1e-8) {
+      tangent1 = new THREE.Vector3(0, 1, 0).cross(userNormal);
     }
+    tangent1.normalize();
+
+    const tangent2 = new THREE.Vector3().crossVectors(userNormal, tangent1).normalize();
+
+    // 4. 랜덤 방향 축 (userNormal 주위의 원 위의 점)
+    const randomAxis = new THREE.Vector3()
+      .addScaledVector(tangent1, Math.cos(randomAngle))
+      .addScaledVector(tangent2, Math.sin(randomAngle))
+      .normalize();
+
+    // 5. 랜덤 방향으로 targetAngle만큼 회전
+    const quaternion = new THREE.Quaternion().setFromAxisAngle(randomAxis, targetAngle);
+    const normal = userNormal.clone().applyQuaternion(quaternion).normalize();
 
     // 감정 기반 색상
     const colorHex = this.getEmotionalGlowColor(placeData.emotionKeywords);
@@ -1925,7 +1957,8 @@ class MapView {
 
       console.log(`🎨 Field place added [${index}]: ${placeData.name}`);
       console.log(`   Real: ${placeData.latitude.toFixed(4)}°N, ${placeData.longitude.toFixed(4)}°E`);
-      console.log(`   Angle: actual=${(actualAngle * 180 / Math.PI).toFixed(1)}°, target=${(targetAngle * 180 / Math.PI).toFixed(1)}°`);
+      console.log(`   Distance: ${(targetAngle * 180 / Math.PI).toFixed(1)}° (intimacy-based)`);
+      console.log(`   Direction: ${(randomAngle * 180 / Math.PI).toFixed(1)}° (deterministic random)`);
       console.log(`   Normal: (${normal.x.toFixed(3)}, ${normal.y.toFixed(3)}, ${normal.z.toFixed(3)})`);
       console.log(`   Color: ${colorHex}, Intimacy: ${intimacy.toFixed(2)}, Base Radius: ${baseRadius.toFixed(3)}, Blocked: ${blocked}`);
       console.log(`🌀 Mandala scale applied: ${placeData.name}, intimacy=${t.toFixed(2)}, scale=${visualScale.toFixed(2)}`);
@@ -2089,10 +2122,62 @@ class MapView {
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
   }
 
-  getPlaceAtPosition() {
-    // TODO: Implement 3D raycasting for place selection
-    // For now, return null (place selection disabled)
-    return null;
+  getPlaceAtPosition(canvasX, canvasY) {
+    // Convert canvas coordinates to normalized device coordinates (-1 to +1)
+    const mouse = new THREE.Vector2();
+    mouse.x = (canvasX / this.canvas.width) * 2 - 1;
+    mouse.y = -(canvasY / this.canvas.height) * 2 + 1;
+
+    // Raycast to find intersection with sphere
+    this.raycaster.setFromCamera(mouse, this.camera);
+    const intersects = this.raycaster.intersectObject(this.sphere);
+
+    if (intersects.length === 0) {
+      console.log('🖱️ Click: no sphere intersection');
+      return null;
+    }
+
+    // Get the 3D point on the sphere surface
+    const intersectionPoint = intersects[0].point;
+    const clickedNormal = intersectionPoint.clone().normalize();
+
+    console.log(`🖱️ Click on sphere: (${clickedNormal.x.toFixed(3)}, ${clickedNormal.y.toFixed(3)}, ${clickedNormal.z.toFixed(3)})`);
+    console.log(`   Places count: ${this.sphereUniforms.uPlacesCount.value}`);
+
+    // Find the closest place to the clicked point
+    let closestPlace = null;
+    let smallestAngle = Infinity;
+
+    for (const place of this.placeholders) {
+      // Get the place's position on sphere (stored in shader uniforms)
+      const placeIndex = this.placeholders.indexOf(place);
+      if (placeIndex >= this.sphereUniforms.uPlacesCount.value) continue;
+
+      const placeNormal = this.sphereUniforms.uPlacePositions.value[placeIndex];
+      if (!placeNormal) continue;
+
+      // Calculate angle between clicked point and place position
+      const dot = clickedNormal.dot(placeNormal);
+      const angle = Math.acos(THREE.MathUtils.clamp(dot, -1, 1));
+
+      // Get the place's visual radius (considering intimacy-based scaling)
+      const baseRadius = this.sphereUniforms.uPlaceRadius.value[placeIndex];
+      const visualScale = this.sphereUniforms.uPlaceVisualScale.value[placeIndex];
+      const effectiveRadius = baseRadius * visualScale;
+
+      // Check if click is within the place's visual radius
+      if (angle < effectiveRadius && angle < smallestAngle) {
+        smallestAngle = angle;
+        closestPlace = place;
+        console.log(`   ✓ Found place: ${place.name} (angle=${(angle * 180 / Math.PI).toFixed(1)}°, radius=${(effectiveRadius * 180 / Math.PI).toFixed(1)}°)`);
+      }
+    }
+
+    if (!closestPlace) {
+      console.log('   ✗ No place found within click radius');
+    }
+
+    return closestPlace;
   }
 
   getPlaceAtPosition_OLD_2D(x, y) {
@@ -2119,26 +2204,22 @@ class MapView {
 
   // 4. SHORT TAP: Show speech bubble
   showSpeechBubble(place, x, y) {
-    // Check if this is a forbidden zone destination
-    const centerX = this.canvas.width / 2;
-    const centerY = this.canvas.height / 2;
-    const userPosition = { x: centerX, y: centerY };
-
-    const validation = validateDestination(place, userPosition, this.placeholders);
-
-    if (!validation.isValid) {
-      // Show destination warning instead of speech bubble
-      alert(validation.warning);
-      console.log('⚠️ Forbidden zone destination blocked');
-      return;
-    }
-
     const bubble = document.getElementById('speech-bubble');
     const nameEl = document.getElementById('bubble-place-name');
     const memoryEl = document.getElementById('bubble-memory-text');
+    const mandalaContainer = document.getElementById('bubble-mandala-container');
+    const mandalaImg = document.getElementById('bubble-mandala-img');
 
     nameEl.textContent = place.name;
-    memoryEl.textContent = place.memory;
+    memoryEl.textContent = place.memory || '(기억 없음)';
+
+    // Show mandala if available
+    if (place.mandalaImage) {
+      mandalaImg.src = place.mandalaImage;
+      mandalaContainer.style.display = 'block';
+    } else {
+      mandalaContainer.style.display = 'none';
+    }
 
     // Position bubble near the mandala
     bubble.style.left = `${x + 50}px`;
@@ -2156,6 +2237,119 @@ class MapView {
 
   hideSpeechBubble() {
     document.getElementById('speech-bubble').classList.add('hidden');
+  }
+
+  // Toggle memory overlay - show all places with mandala/name/memory
+  toggleMemoryOverlay() {
+    this.memoryOverlayVisible = !this.memoryOverlayVisible;
+    const container = document.getElementById('memory-overlay-container');
+
+    if (this.memoryOverlayVisible) {
+      console.log('📍 Showing memory overlay');
+      container.classList.remove('hidden');
+      this.updateMemoryOverlay();
+    } else {
+      console.log('📍 Hiding memory overlay');
+      container.classList.add('hidden');
+      container.innerHTML = '';
+    }
+  }
+
+  // Update memory overlay positions (called during render loop if visible)
+  updateMemoryOverlay() {
+    const container = document.getElementById('memory-overlay-container');
+    container.innerHTML = '';
+
+    console.log(`📍 updateMemoryOverlay: visible=${this.memoryOverlayVisible}, places=${this.placeholders.length}`);
+
+    if (!this.memoryOverlayVisible || this.placeholders.length === 0) {
+      console.log(`   ❌ Skipping: visible=${this.memoryOverlayVisible}, places=${this.placeholders.length}`);
+      return;
+    }
+
+    let cardsCreated = 0;
+    let cardsSkipped = 0;
+
+    // For each place, calculate screen position and create card
+    for (let i = 0; i < this.placeholders.length; i++) {
+      const place = this.placeholders[i];
+
+      // Get 3D position from shader uniforms
+      const placeNormal = this.sphereUniforms.uPlacePositions.value[i];
+      if (!placeNormal) {
+        console.log(`   ⚠️ Place ${i} (${place.name}): no placeNormal`);
+        cardsSkipped++;
+        continue;
+      }
+
+      // Convert 3D position to screen coordinates
+      const screenPos = this.worldToScreen(placeNormal);
+
+      // Skip if behind camera or out of view
+      if (!screenPos) {
+        console.log(`   ⚠️ Place ${i} (${place.name}): behind camera`);
+        cardsSkipped++;
+        continue;
+      }
+
+      if (screenPos.x < 0 || screenPos.x > this.canvas.width ||
+          screenPos.y < 0 || screenPos.y > this.canvas.height) {
+        console.log(`   ⚠️ Place ${i} (${place.name}): out of view (${screenPos.x.toFixed(1)}, ${screenPos.y.toFixed(1)})`);
+        cardsSkipped++;
+        continue;
+      }
+
+      // Create memory card
+      const card = document.createElement('div');
+      card.className = 'place-memory-card';
+      card.style.left = `${screenPos.x}px`;
+      card.style.top = `${screenPos.y}px`;
+
+      console.log(`   ✅ Place ${i} (${place.name}): card at (${screenPos.x.toFixed(1)}, ${screenPos.y.toFixed(1)})`);
+      cardsCreated++;
+
+      // Mandala image
+      if (place.mandalaImage) {
+        const mandalaImg = document.createElement('img');
+        mandalaImg.className = 'place-card-mandala';
+        mandalaImg.src = place.mandalaImage;
+        mandalaImg.alt = place.name;
+        card.appendChild(mandalaImg);
+      }
+
+      // Place name
+      const nameEl = document.createElement('h4');
+      nameEl.className = 'place-card-name';
+      nameEl.textContent = place.name;
+      card.appendChild(nameEl);
+
+      // Memory text
+      const memoryEl = document.createElement('p');
+      memoryEl.className = 'place-card-memory';
+      memoryEl.textContent = place.memory || '(기억 없음)';
+      card.appendChild(memoryEl);
+
+      container.appendChild(card);
+    }
+
+    console.log(`📍 Memory overlay update complete: ${cardsCreated} cards created, ${cardsSkipped} skipped`);
+  }
+
+  // Convert 3D world position to 2D screen coordinates
+  worldToScreen(worldPos) {
+    const vector = new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z);
+    vector.project(this.camera);
+
+    // Convert to screen pixels
+    const x = (vector.x + 1) * this.canvas.width / 2;
+    const y = (-vector.y + 1) * this.canvas.height / 2;
+
+    // Check if behind camera (z > 1 means behind)
+    if (vector.z > 1) {
+      return null;
+    }
+
+    return { x, y };
   }
 
   // 5. LONG PRESS: Show delete confirmation
@@ -2240,7 +2434,15 @@ class MapView {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
+      console.log(`👆 Pointer down at canvas: (${x.toFixed(1)}, ${y.toFixed(1)})`);
+
       const place = this.getPlaceAtPosition(x, y);
+
+      if (place) {
+        console.log(`   ✅ Found place: ${place.name}`);
+      } else {
+        console.log(`   ❌ No place found at this position`);
+      }
 
       // Store start position for drag detection
       dragStartPixel = { x: e.clientX, y: e.clientY };
@@ -2300,6 +2502,8 @@ class MapView {
       const pressDuration = Date.now() - touchStartTime;
       const currentTime = Date.now();
 
+      console.log(`👆 Pointer up - pressDuration: ${pressDuration}ms, touchedPlace: ${touchedPlace ? touchedPlace.name : 'null'}, isDragging: ${isDraggingMap}`);
+
       // Reset cursor
       this.canvas.style.cursor = 'grab';
 
@@ -2320,6 +2524,8 @@ class MapView {
 
       // Short tap (< 2 seconds)
       if (touchedPlace && pressDuration < this.longPressDuration) {
+        console.log(`   ✅ Short tap detected on ${touchedPlace.name}`);
+
         // Check for double click
         const timeSinceLastClick = currentTime - lastClickTime;
         const isSamePlace = lastClickedPlace && lastClickedPlace.name === touchedPlace.name;
@@ -2332,10 +2538,15 @@ class MapView {
           lastClickedPlace = null;
         } else {
           // Single click - show speech bubble
+          console.log(`💬 Calling showSpeechBubble for ${touchedPlace.name}`);
           this.showSpeechBubble(touchedPlace, e.clientX, e.clientY);
           lastClickTime = currentTime;
           lastClickedPlace = touchedPlace;
         }
+      } else if (touchedPlace) {
+        console.log(`   ⏱️ Long press detected (${pressDuration}ms >= ${this.longPressDuration}ms)`);
+      } else {
+        console.log(`   ❌ No touchedPlace`);
       }
 
       touchedPlace = null;
@@ -2395,6 +2606,12 @@ class MapView {
     // Navigation
     document.getElementById('nav-btn').addEventListener('click', () => {
       this.showNavigationModal();
+    });
+
+    // Memory overlay toggle
+    document.getElementById('memory-overlay-btn').addEventListener('click', () => {
+      console.log('📍 Memory overlay button clicked');
+      this.toggleMemoryOverlay();
     });
 
     // Add place - show modal with search + data input
