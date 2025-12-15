@@ -566,6 +566,48 @@ body {
     font-size: 1rem;
 }
 
+/* Destination Replacement Modal & Navigation Messages */
+.narrative-text {
+    font-style: italic;
+    color: #616161;
+    font-size: 1.1rem;
+    margin-bottom: 1rem;
+}
+
+.modal-btn-yes {
+    background: #2196F3;
+    color: #ffffff;
+}
+
+.modal-btn-yes:hover {
+    background: #1976D2;
+}
+
+.nav-message {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0, 0, 0, 0.85);
+    color: #ffffff;
+    padding: 2rem 3rem;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    line-height: 1.6;
+    max-width: 500px;
+    text-align: center;
+    z-index: 2000;
+    pointer-events: none;
+    animation: fadeInOut 4s ease-in-out;
+}
+
+@keyframes fadeInOut {
+    0% { opacity: 0; }
+    10% { opacity: 1; }
+    90% { opacity: 1; }
+    100% { opacity: 0; }
+}
+
 /* Bottom Action Bar */
 .map-bottom-bar {
     display: flex;

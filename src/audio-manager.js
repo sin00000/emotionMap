@@ -2,7 +2,7 @@
  * AudioManager - Emotion-based BGM system
  *
  * Core principle: Routes without music DO NOT EXIST.
- * - Avoidance zones = silence zones (no passage)
+ * - Intimacy < 6 = 무음 지대 (silence zones, no passage)
  * - Closer to silence zone → volume decreases
  * - Multiple keywords → sequential playback (NOT mixing)
  * - Neutral state (far from all places) → drone oscillator
@@ -31,15 +31,15 @@ export class AudioManager {
     this.currentVolume = 1.0;
     this.masterVolume = 1.0;
 
-    // Song counts per emotion keyword (adjust if needed)
+    // Song counts per emotion keyword (based on actual files in /public/song/)
     this.songCounts = {
-      calm: 3,
-      affection: 3,
-      anxiety: 3,
+      calm: 4,
+      affection: 4,
+      anxiety: 4,
       avoidance: 3,
       emptiness: 3,
-      impulse: 3,
-      tension: 3
+      impulse: 5,
+      tension: 4
     };
 
     console.log('🎵 AudioManager initialized');
@@ -53,7 +53,9 @@ export class AudioManager {
   pickRandomSong(keyword) {
     const count = this.songCounts[keyword] || 1;
     const randomNum = Math.floor(Math.random() * count) + 1;
-    const url = `/song/${keyword}${randomNum}.mp3`;
+    // Use BASE_URL for correct path in both dev and production
+    const basePath = import.meta.env.BASE_URL || '/';
+    const url = `${basePath}song/${keyword}${randomNum}.mp3`.replace('//', '/');
     console.log(`🎵 Selected: ${url}`);
     return url;
   }
@@ -220,9 +222,9 @@ export class AudioManager {
     const maxIndex = weights.indexOf(wMax);
     const closestPlace = this.places[maxIndex];
 
-    // ⭐ Mute zone check (avoidance or low intimacy)
+    // ⭐ Mute zone check (intimacy < 6)
     const intimacy = closestPlace.intimacy !== undefined ? closestPlace.intimacy : closestPlace.intimacyScore;
-    const isBlocked = closestPlace.emotionKeywords?.includes('avoidance') || intimacy <= 30;
+    const isBlocked = intimacy < 6;
 
     if (isBlocked) {
       this.enterMuteZone(closestPlace.name);

@@ -1,429 +1,121 @@
+/**
+ * PathFinder - Distorted Terrain Physics-based Navigation
+ *
+ * Core principle: Navigation follows distorted space physics
+ * - Slope constraints (can't climb too steep)
+ * - Blocked zones (intimacy < 6)
+ * - Comfort cost (lower intimacy = higher cost)
+ */
+
+import * as THREE from 'three';
+
 export class PathFinder {
   constructor() {
+    this.places = [];
     this.forbiddenZones = [];
     this.preferredZones = [];
-    this.places = [];
+
+    // Terrain physics parameters - 2-stage pathfinding
+    this.slopeMaxStrict = 0.25; // Stage 1: strict slope limit
+    this.slopeMaxFallback = 0.45; // Stage 2: relaxed slope limit
+    this.slopeWeight = 5.0; // Cost multiplier for slopes
+    this.lowIntimacyThreshold = 6; // Threshold for destination replacement
+
+    // Height field function (will be set by MapView)
+    this.getHeightAt = null;
+
+    console.log('🗺️ PathFinder initialized (physics-based, 2-stage)');
   }
 
-  // Set places to identify forbidden and preferred zones
-  setPlaces(places) {
+  /**
+   * Set places and height field function
+   * @param {Array} places - Place objects with normal, intimacy, emotionKeywords
+   * @param {Function} getHeightAtFunc - Function(normal) => height
+   */
+  setPlaces(places, getHeightAtFunc = null) {
     this.places = places;
+    this.getHeightAt = getHeightAtFunc;
 
-    // 친밀도 30 이하: 금지구역 (통과 불가)
-    this.forbiddenZones = places.filter(p =>
-      (p.intimacy !== undefined ? p.intimacy : p.intimacyScore) <= 30
-    );
+    // Forbidden zones: intimacy < 6
+    this.forbiddenZones = places.filter(p => {
+      const intimacy = p.intimacy !== undefined ? p.intimacy : p.intimacyScore;
+      return intimacy !== undefined && intimacy < 6;
+    });
 
-    // 친밀도 70 이상: 환영하는 길 (최우선 선호)
-    this.preferredZones = places.filter(p =>
-      (p.intimacy !== undefined ? p.intimacy : p.intimacyScore) > 70
-    );
+    // Preferred zones: intimacy > 70
+    this.preferredZones = places.filter(p => {
+      const intimacy = p.intimacy !== undefined ? p.intimacy : p.intimacyScore;
+      return intimacy !== undefined && intimacy > 70;
+    });
 
-    console.log(`🗺️ PathFinder initialized: ${this.forbiddenZones.length} forbidden, ${this.preferredZones.length} preferred zones`);
+    console.log(`🗺️ PathFinder: ${this.forbiddenZones.length} forbidden, ${this.preferredZones.length} preferred zones`);
+
+    // Debug: Log all place intimacy values
+    places.forEach(p => {
+      const intimacy = p.intimacy !== undefined ? p.intimacy : p.intimacyScore;
+      console.log(`  - "${p.name}": intimacy=${intimacy}, hasNormal=${!!p.normal}`);
+    });
   }
 
   /**
-   * Get emotional weight for a place (A* heuristic)
-   * @returns {number} - Weight multiplier (0.1 = very preferred, Infinity = forbidden)
+   * Calculate spherical angle between two normal vectors
    */
-  getEmotionalWeight(place) {
-    const intimacy = place.intimacy !== undefined ? place.intimacy : place.intimacyScore;
-
-    if (intimacy <= 30) {
-      return Infinity; // 금지구역: 통과 불가
-    } else if (intimacy <= 50) {
-      return 10.0; // 불편한 길: 높은 가중치
-    } else if (intimacy <= 70) {
-      return 0.5; // 편안한 길: 낮은 가중치
-    } else {
-      return 0.1; // 환영하는 길: 최우선 선호
-    }
+  calculateAngle(v1, v2) {
+    const dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+    return Math.acos(Math.min(1, Math.max(-1, dot)));
   }
 
-  // Check if a point is in a forbidden zone
-  isInForbiddenZone(lat, lng, radius = 50) {
+  /**
+   * Check if a point is in forbidden zone (intimacy < 6)
+   * @param {Object} normal - Point normal vector {x, y, z}
+   * @returns {boolean}
+   */
+  isInForbiddenZone(normal) {
+    const influenceRadius = Math.PI / 90; // ~2 degrees (very tight blocking)
+
     return this.forbiddenZones.some(zone => {
-      const distance = this.calculateDistance(lat, lng, zone.latitude, zone.longitude);
-      return distance < radius;
+      if (!zone.normal) return false;
+      const angle = this.calculateAngle(normal, zone.normal);
+      const isBlocked = angle < influenceRadius;
+      if (isBlocked) {
+        console.log(`[PATHFINDER] 🚫 Blocked by "${zone.name}" (distance: ${(angle * 180 / Math.PI).toFixed(1)}°)`);
+      }
+      return isBlocked;
     });
   }
 
-  // Calculate distance between two GPS coordinates
-  calculateDistance(lat1, lng1, lat2, lng2) {
-    const R = 6371e3; // Earth radius in meters
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lng2 - lng1) * Math.PI / 180;
-
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-    return R * c; // Distance in meters
-  }
-
-  // Generate a path from start to end, avoiding forbidden zones
-  generatePath(startLat, startLng, endLat, endLng) {
-    // Check if destination is a forbidden zone
-    if (this.isInForbiddenZone(endLat, endLng)) {
-      // Find alternative preferred destination
-      const alternative = this.findAlternativeDestination(startLat, startLng, endLat, endLng);
-
-      if (alternative) {
-        return {
-          valid: false,
-          warning: `The closer destination is ${alternative.name} rather than the avoided place.`,
-          alternative: alternative,
-          path: []
-        };
-      } else {
-        return {
-          valid: false,
-          warning: 'Cannot navigate to an avoidance zone.',
-          path: []
-        };
-      }
-    }
-
-    // Simple pathfinding with avoidance
-    const path = this.calculateAvoidancePath(startLat, startLng, endLat, endLng);
-
-    if (path.length === 0) {
-      return {
-        valid: false,
-        warning: 'No valid path exists that avoids forbidden zones.',
-        path: []
-      };
-    }
-
-    return {
-      valid: true,
-      path: path
-    };
-  }
-
-  // Calculate path with waypoints to avoid forbidden zones
-  calculateAvoidancePath(startLat, startLng, endLat, endLng) {
-    const path = [{ lat: startLat, lng: startLng }];
-    const steps = 20; // Number of interpolation steps
-
-    // Generate straight line path
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const lat = startLat + (endLat - startLat) * t;
-      const lng = startLng + (endLng - startLng) * t;
-
-      // Check if this point is in a forbidden zone
-      if (this.isInForbiddenZone(lat, lng)) {
-        // Try to find a detour
-        const detour = this.findDetour(
-          path[path.length - 1].lat,
-          path[path.length - 1].lng,
-          lat,
-          lng
-        );
-
-        if (detour) {
-          path.push(...detour);
-        } else {
-          // No valid path
-          return [];
-        }
-      } else {
-        path.push({ lat, lng });
-      }
-    }
-
-    // Optimize path to go through preferred zones if possible
-    const optimizedPath = this.optimizePathThroughPreferredZones(path);
-
-    return optimizedPath;
-  }
-
-  // Find a detour around a forbidden zone
-  findDetour(fromLat, fromLng, toLat, toLng) {
-    // Simple detour: try perpendicular offsets
-    const midLat = (fromLat + toLat) / 2;
-    const midLng = (fromLng + toLng) / 2;
-
-    const offsets = [
-      { lat: 0.001, lng: 0.001 },
-      { lat: -0.001, lng: 0.001 },
-      { lat: 0.001, lng: -0.001 },
-      { lat: -0.001, lng: -0.001 },
-      { lat: 0.002, lng: 0 },
-      { lat: -0.002, lng: 0 },
-      { lat: 0, lng: 0.002 },
-      { lat: 0, lng: -0.002 }
-    ];
-
-    for (const offset of offsets) {
-      const detourLat = midLat + offset.lat;
-      const detourLng = midLng + offset.lng;
-
-      if (!this.isInForbiddenZone(detourLat, detourLng)) {
-        return [
-          { lat: detourLat, lng: detourLng },
-          { lat: toLat, lng: toLng }
-        ];
-      }
-    }
-
-    return null; // No detour found
-  }
-
-  // Optimize path to route through high-intimacy zones
-  optimizePathThroughPreferredZones(path) {
-    if (this.preferredZones.length === 0) {
-      return path;
-    }
-
-    // Find preferred zones near the path
-    const nearbyPreferred = this.preferredZones.filter(zone => {
-      return path.some(point => {
-        const distance = this.calculateDistance(
-          point.lat,
-          point.lng,
-          zone.latitude,
-          zone.longitude
-        );
-        return distance < 200; // Within 200m of path
-      });
-    });
-
-    // If there are nearby preferred zones, route through them
-    if (nearbyPreferred.length > 0) {
-      const optimized = [];
-      optimized.push(path[0]); // Start point
-
-      // Add waypoints through preferred zones
-      nearbyPreferred.forEach(zone => {
-        optimized.push({ lat: zone.latitude, lng: zone.longitude });
-      });
-
-      optimized.push(path[path.length - 1]); // End point
-
-      return optimized;
-    }
-
-    return path;
-  }
-
-  // Find an alternative destination (preferred place)
-  findAlternativeDestination(startLat, startLng, avoidedLat, avoidedLng) {
-    if (this.preferredZones.length === 0) {
-      return null;
-    }
-
-    // Find the closest preferred zone
-    let closest = null;
-    let minDistance = Infinity;
-
-    this.preferredZones.forEach(zone => {
-      const distance = this.calculateDistance(startLat, startLng, zone.latitude, zone.longitude);
-
-      if (distance < minDistance) {
-        minDistance = distance;
-        closest = zone;
-      }
-    });
-
-    return closest ? {
-      name: closest.realPlaceName,
-      lat: closest.latitude,
-      lng: closest.longitude,
-      intimacyScore: closest.intimacyScore
-    } : null;
-  }
-
-  // Visualize path on canvas
-  drawPath(ctx, path, userLocation, viewWidth, viewHeight) {
-    if (!path || path.length < 2) {
-      return;
-    }
-
-    ctx.strokeStyle = '#64FFDA';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([10, 5]);
-
-    ctx.beginPath();
-
-    path.forEach((point, index) => {
-      // Convert GPS to screen coordinates (simplified)
-      const x = (point.lng - userLocation.lng) * 10000 + viewWidth / 2;
-      const y = -(point.lat - userLocation.lat) * 10000 + viewHeight / 2;
-
-      if (index === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    });
-
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // Check if path crosses forbidden zones
-  isPathValid(path) {
-    return !path.some(point =>
-      this.isInForbiddenZone(point.lat, point.lng)
-    );
-  }
-
   /**
-   * A* PATHFINDING WITH EMOTIONAL WEIGHTS
-   * Finds optimal path considering emotional zones
+   * Get comfort weight for a point (influenced by nearby places)
+   * @param {Object} normal - Point normal vector
+   * @returns {number} - Weight (0.1 = very comfortable, 10.0 = uncomfortable, Infinity = blocked)
    */
-  findPathAStar(startLat, startLng, endLat, endLng) {
-    console.log(`🧭 A* pathfinding: (${startLat.toFixed(4)}, ${startLng.toFixed(4)}) → (${endLat.toFixed(4)}, ${endLng.toFixed(4)})`);
-
-    // Check if destination is forbidden
-    if (this.isInForbiddenZone(endLat, endLng)) {
-      const alternative = this.findAlternativeDestination(startLat, startLng, endLat, endLng);
-      return {
-        valid: false,
-        warning: alternative
-          ? `"${alternative.name}"이(가) 더 가까운 목적지입니다.`
-          : '금지구역으로는 갈 수 없습니다.',
-        alternative: alternative,
-        path: []
-      };
-    }
-
-    // Create grid of waypoints (simplified A*)
-    const path = this.aStarSimplified(startLat, startLng, endLat, endLng);
-
-    if (path.length === 0) {
-      return {
-        valid: false,
-        warning: '유효한 경로를 찾을 수 없습니다.',
-        path: []
-      };
-    }
-
-    return {
-      valid: true,
-      path: path,
-      totalDistance: this.calculatePathDistance(path),
-      emotionalCost: this.calculateEmotionalCost(path)
-    };
-  }
-
-  /**
-   * Simplified A* algorithm for GPS pathfinding
-   */
-  aStarSimplified(startLat, startLng, endLat, endLng) {
-    const openSet = [];
-    const closedSet = new Set();
-    const cameFrom = new Map();
-    const gScore = new Map();
-    const fScore = new Map();
-
-    const startKey = `${startLat},${startLng}`;
-    const endKey = `${endLat},${endLng}`;
-
-    openSet.push({ lat: startLat, lng: startLng, key: startKey });
-    gScore.set(startKey, 0);
-    fScore.set(startKey, this.calculateDistance(startLat, startLng, endLat, endLng));
-
-    let iterations = 0;
-    const maxIterations = 100;
-
-    while (openSet.length > 0 && iterations < maxIterations) {
-      iterations++;
-
-      // Find node with lowest fScore
-      openSet.sort((a, b) => fScore.get(a.key) - fScore.get(b.key));
-      const current = openSet.shift();
-
-      // Reached destination
-      if (this.calculateDistance(current.lat, current.lng, endLat, endLng) < 10) {
-        return this.reconstructPath(cameFrom, endKey, current.key);
-      }
-
-      closedSet.add(current.key);
-
-      // Generate neighbors (8-directional movement)
-      const neighbors = this.getNeighbors(current.lat, current.lng, endLat, endLng);
-
-      for (const neighbor of neighbors) {
-        const neighborKey = `${neighbor.lat},${neighbor.lng}`;
-
-        if (closedSet.has(neighborKey)) continue;
-
-        // Check if neighbor is in forbidden zone
-        if (this.isInForbiddenZone(neighbor.lat, neighbor.lng)) {
-          continue; // Skip forbidden zones
-        }
-
-        // Calculate tentative gScore
-        const distance = this.calculateDistance(current.lat, current.lng, neighbor.lat, neighbor.lng);
-        const emotionalWeight = this.getEmotionalWeightForPoint(neighbor.lat, neighbor.lng);
-        const tentativeGScore = (gScore.get(current.key) || Infinity) + distance * emotionalWeight;
-
-        if (tentativeGScore < (gScore.get(neighborKey) || Infinity)) {
-          // This path is better
-          cameFrom.set(neighborKey, current.key);
-          gScore.set(neighborKey, tentativeGScore);
-          fScore.set(neighborKey, tentativeGScore + this.calculateDistance(neighbor.lat, neighbor.lng, endLat, endLng));
-
-          if (!openSet.find(n => n.key === neighborKey)) {
-            openSet.push(neighbor);
-          }
-        }
-      }
-    }
-
-    // No path found, return direct line (if no forbidden zones)
-    return this.calculateAvoidancePath(startLat, startLng, endLat, endLng);
-  }
-
-  /**
-   * Get neighbors for A* (8 directions)
-   */
-  getNeighbors(lat, lng, targetLat, targetLng) {
-    const stepSize = 0.001; // ~111 meters
-    const neighbors = [];
-
-    // 8 directions
-    const directions = [
-      { lat: stepSize, lng: 0 },
-      { lat: -stepSize, lng: 0 },
-      { lat: 0, lng: stepSize },
-      { lat: 0, lng: -stepSize },
-      { lat: stepSize, lng: stepSize },
-      { lat: stepSize, lng: -stepSize },
-      { lat: -stepSize, lng: stepSize },
-      { lat: -stepSize, lng: -stepSize }
-    ];
-
-    for (const dir of directions) {
-      neighbors.push({
-        lat: lat + dir.lat,
-        lng: lng + dir.lng,
-        key: `${lat + dir.lat},${lng + dir.lng}`
-      });
-    }
-
-    return neighbors;
-  }
-
-  /**
-   * Get emotional weight for a GPS point (influenced by nearby places)
-   */
-  getEmotionalWeightForPoint(lat, lng) {
-    let minWeight = 1.0; // Default neutral weight
+  getComfortWeight(normal) {
+    let minWeight = 1.0; // Neutral
 
     for (const place of this.places) {
-      const distance = this.calculateDistance(lat, lng, place.latitude, place.longitude);
+      if (!place.normal) continue;
 
-      // If within influence radius (100m)
-      if (distance < 100) {
-        const weight = this.getEmotionalWeight(place);
-        minWeight = Math.min(minWeight, weight); // Use lowest (best) weight
+      const angle = this.calculateAngle(normal, place.normal);
+      const influenceRadius = Math.PI / 8; // ~22.5 degrees
+
+      if (angle < influenceRadius) {
+        const intimacy = place.intimacy !== undefined ? place.intimacy : place.intimacyScore;
+
+        if (intimacy <= 30) {
+          return Infinity; // Blocked
+        }
+
+        // Comfort weight based on intimacy
+        let weight;
+        if (intimacy > 70) {
+          weight = 0.1; // Very comfortable
+        } else if (intimacy > 50) {
+          weight = 0.5; // Comfortable
+        } else {
+          weight = 10.0; // Uncomfortable
+        }
+
+        minWeight = Math.min(minWeight, weight);
       }
     }
 
@@ -431,45 +123,317 @@ export class PathFinder {
   }
 
   /**
-   * Reconstruct path from A* cameFrom map
+   * Calculate slope between two points on sphere
+   * @param {Object} normal1 - Start normal vector
+   * @param {Object} normal2 - End normal vector
+   * @returns {number} - Slope (rise/run ratio)
    */
-  reconstructPath(cameFrom, endKey, currentKey) {
+  calculateSlope(normal1, normal2) {
+    if (!this.getHeightAt) return 0;
+
+    const h1 = this.getHeightAt(normal1);
+    const h2 = this.getHeightAt(normal2);
+    const angle = this.calculateAngle(normal1, normal2);
+
+    if (angle < 0.001) return 0; // Too close
+
+    const rise = Math.abs(h2 - h1);
+    const run = angle;
+
+    return rise / run;
+  }
+
+  /**
+   * Compute path from user to destination
+   * Uses 2-stage pathfinding: strict → fallback slope limits
+   * Preferred zones (intimacy > 70) attract path ("new roads")
+   *
+   * @param {Object} userNormal - User position normal vector
+   * @param {Object} destPlace - Destination place object
+   * @returns {Object} - {valid, path: [normals], warning, failureReason, isFallback}
+   */
+  computePath(userNormal, destPlace) {
+    if (!destPlace || !destPlace.normal) {
+      console.warn('[PATHFINDER] Invalid destination:', destPlace);
+      return {
+        valid: false,
+        path: [],
+        warning: '목적지가 유효하지 않습니다.',
+        failureReason: 'invalid_destination'
+      };
+    }
+
+    const destNormal = destPlace.normal;
+
+    // Check if destination itself has very low intimacy (< 6)
+    const destIntimacy = destPlace.intimacy !== undefined ? destPlace.intimacy : destPlace.intimacyScore;
+    if (destIntimacy !== undefined && destIntimacy < 6) {
+      console.warn('[PATHFINDER] Destination itself is a forbidden zone (intimacy:', destIntimacy, ')');
+      return {
+        valid: false,
+        path: [],
+        warning: '무음 지대에 의해 경로가 끊깁니다.',
+        failureReason: 'mute_zone'
+      };
+    }
+
+    // ⭐ Find preferred waypoints along path (intimacy > 70)
+    const waypoints = this.findPreferredWaypoints(userNormal, destNormal);
+
+    // Sample waypoints along path (with preferred zone attraction)
+    const samples = 50;
     const path = [];
-    let current = currentKey;
 
-    while (cameFrom.has(current)) {
-      const [lat, lng] = current.split(',').map(parseFloat);
-      path.unshift({ lat, lng });
-      current = cameFrom.get(current);
+    if (waypoints.length === 0) {
+      // No preferred zones - use direct path
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        const normal = this.slerpNormal(userNormal, destNormal, t);
+        path.push(normal);
+      }
+    } else {
+      // Preferred zones found - create path through them
+      console.log(`[PATHFINDER] 💚 Found ${waypoints.length} preferred waypoints, creating comfortable path`);
+
+      // Create path segments: user → waypoint1 → waypoint2 → ... → dest
+      const allPoints = [userNormal, ...waypoints, destNormal];
+      const samplesPerSegment = Math.floor(samples / allPoints.length);
+
+      for (let seg = 0; seg < allPoints.length - 1; seg++) {
+        const start = allPoints[seg];
+        const end = allPoints[seg + 1];
+
+        const segmentSamples = (seg === allPoints.length - 2) ?
+          (samples - path.length) : samplesPerSegment;
+
+        for (let i = 0; i <= segmentSamples; i++) {
+          const t = i / segmentSamples;
+          const normal = this.slerpNormal(start, end, t);
+          path.push(normal);
+        }
+      }
     }
 
-    // Add start point
-    const [startLat, startLng] = current.split(',').map(parseFloat);
-    path.unshift({ lat: startLat, lng: startLng });
+    // ⭐ STAGE 1: Try strict slope limit (0.25)
+    console.log('[PATHFINDER] Stage 1: Attempting strict pathfinding (slope ≤ 0.25)');
+    const strictResult = this.validatePathWithSlopeLimit(path, this.slopeMaxStrict);
 
-    console.log(`✅ Path found with ${path.length} waypoints`);
-    return path;
+    if (strictResult.valid) {
+      console.log('[PATHFINDER] ✅ Stage 1 SUCCESS: Path valid with strict slope');
+      return {
+        valid: true,
+        path: path,
+        totalAngle: this.calculateAngle(userNormal, destNormal),
+        isFallback: false
+      };
+    }
+
+    // ⭐ STAGE 2: Try fallback slope limit (0.45)
+    console.log('[PATHFINDER] Stage 1 FAILED:', strictResult.failureReason);
+    console.log('[PATHFINDER] Stage 2: Attempting fallback pathfinding (slope ≤ 0.45)');
+    const fallbackResult = this.validatePathWithSlopeLimit(path, this.slopeMaxFallback);
+
+    if (fallbackResult.valid) {
+      console.log('[PATHFINDER] ⚠️ Stage 2 SUCCESS: Fallback path found');
+      return {
+        valid: true,
+        path: path,
+        totalAngle: this.calculateAngle(userNormal, destNormal),
+        isFallback: true,
+        warning: '경사가 급하지만 임시 경로를 생성했습니다.'
+      };
+    }
+
+    // Both stages failed - return specific failure reason
+    console.error('[PATHFINDER] ❌ Both stages FAILED:', fallbackResult.failureReason);
+
+    // Determine specific failure message
+    let warning;
+    if (fallbackResult.failureReason === 'mute_zone') {
+      warning = '무음 지대에 의해 경로가 끊깁니다.';
+    } else if (fallbackResult.failureReason === 'slope_exceeded') {
+      warning = '경사가 허용치를 초과해 이동할 수 없습니다.';
+    } else {
+      warning = '경로 그래프가 구성되지 않았습니다(버그).';
+    }
+
+    return {
+      valid: false,
+      path: [],
+      warning: warning,
+      failureReason: fallbackResult.failureReason
+    };
   }
 
   /**
-   * Calculate total path distance
+   * Validate path with specific slope limit
+   * @param {Array} path - Array of normal vectors
+   * @param {number} slopeLimit - Maximum allowed slope
+   * @returns {Object} - {valid: boolean, failureReason: string}
    */
-  calculatePathDistance(path) {
-    let total = 0;
-    for (let i = 1; i < path.length; i++) {
-      total += this.calculateDistance(path[i-1].lat, path[i-1].lng, path[i].lat, path[i].lng);
+  validatePathWithSlopeLimit(path, slopeLimit) {
+    for (let i = 0; i < path.length - 1; i++) {
+      const curr = path[i];
+      const next = path[i + 1];
+
+      // Check mute zone (intimacy < 6)
+      if (this.isInForbiddenZone(curr)) {
+        console.warn(`[PATHFINDER] 🚫 Path point ${i}/${path.length} is in forbidden zone`);
+        console.warn(`[PATHFINDER]    Point: (${curr.x.toFixed(3)}, ${curr.y.toFixed(3)}, ${curr.z.toFixed(3)})`);
+        console.warn(`[PATHFINDER]    Forbidden zones count: ${this.forbiddenZones.length}`);
+        return {
+          valid: false,
+          failureReason: 'mute_zone'
+        };
+      }
+
+      // Check slope
+      const slope = this.calculateSlope(curr, next);
+      if (slope > slopeLimit) {
+        return {
+          valid: false,
+          failureReason: 'slope_exceeded'
+        };
+      }
     }
-    return total;
+
+    return { valid: true };
   }
 
   /**
-   * Calculate emotional cost of path
+   * Spherical linear interpolation between two normal vectors
    */
-  calculateEmotionalCost(path) {
-    let cost = 0;
-    for (const point of path) {
-      cost += this.getEmotionalWeightForPoint(point.lat, point.lng);
+  slerpNormal(v1, v2, t) {
+    const angle = this.calculateAngle(v1, v2);
+
+    if (angle < 0.001) {
+      return { x: v1.x, y: v1.y, z: v1.z };
     }
-    return cost / path.length; // Average emotional weight
+
+    const sinAngle = Math.sin(angle);
+    const a = Math.sin((1 - t) * angle) / sinAngle;
+    const b = Math.sin(t * angle) / sinAngle;
+
+    const result = {
+      x: a * v1.x + b * v2.x,
+      y: a * v1.y + b * v2.y,
+      z: a * v1.z + b * v2.z
+    };
+
+    // Normalize
+    const len = Math.sqrt(result.x * result.x + result.y * result.y + result.z * result.z);
+    result.x /= len;
+    result.y /= len;
+    result.z /= len;
+
+    return result;
+  }
+
+  /**
+   * Find preferred waypoints along path (intimacy > 70)
+   * "좋아하는 장소는 새로운 길을 생성함 (주변 공간 끌어들임)"
+   *
+   * @param {Object} userNormal - Start position
+   * @param {Object} destNormal - End position
+   * @returns {Array} - Array of preferred place normals to route through
+   */
+  findPreferredWaypoints(userNormal, destNormal) {
+    const candidates = [];
+
+    // Find preferred zones (intimacy > 70) near the direct path
+    for (const place of this.preferredZones) {
+      if (!place.normal) continue;
+
+      const intimacy = place.intimacy !== undefined ? place.intimacy : place.intimacyScore;
+      if (intimacy <= 70) continue; // Only highly preferred zones
+
+      // Calculate distance from place to the direct path (user → dest)
+      const pathMidpoint = this.slerpNormal(userNormal, destNormal, 0.5);
+      const distanceToPath = this.calculateAngle(place.normal, pathMidpoint);
+
+      // Only include places reasonably close to path
+      const maxDistanceFromPath = Math.PI / 4; // 45 degrees
+      if (distanceToPath > maxDistanceFromPath) continue;
+
+      // Calculate position along path (0 = start, 1 = end)
+      const angleToPlace = this.calculateAngle(userNormal, place.normal);
+      const totalPathAngle = this.calculateAngle(userNormal, destNormal);
+      const positionAlongPath = angleToPlace / totalPathAngle;
+
+      // Only include waypoints in middle section (not too close to start/end)
+      if (positionAlongPath < 0.2 || positionAlongPath > 0.8) continue;
+
+      candidates.push({
+        normal: place.normal,
+        intimacy: intimacy,
+        distanceToPath: distanceToPath,
+        positionAlongPath: positionAlongPath,
+        name: place.name
+      });
+    }
+
+    if (candidates.length === 0) return [];
+
+    // Sort by position along path, then by intimacy (higher = better)
+    candidates.sort((a, b) => {
+      const posDiff = a.positionAlongPath - b.positionAlongPath;
+      if (Math.abs(posDiff) > 0.1) return posDiff; // Different sections
+      return b.intimacy - a.intimacy; // Same section → prefer higher intimacy
+    });
+
+    // Take up to 2 waypoints to avoid overly complex paths
+    const selectedWaypoints = candidates.slice(0, 2).map(c => {
+      console.log(`[PATHFINDER] 💚 Waypoint: "${c.name}" (intimacy: ${c.intimacy}, pos: ${(c.positionAlongPath * 100).toFixed(0)}%)`);
+      return c.normal;
+    });
+
+    return selectedWaypoints;
+  }
+
+  /**
+   * Find alternative destination (higher intimacy, not blocked)
+   * @param {Object} userNormal - User position
+   * @param {Object} originalDest - Original destination place
+   * @returns {Object|null} - Alternative place or null
+   */
+  findAlternativeDestination(userNormal, originalDest) {
+    const originalIntimacy = originalDest.intimacy !== undefined ? originalDest.intimacy : originalDest.intimacyScore;
+
+    // Find candidates: not blocked, higher intimacy than original
+    const candidates = this.places.filter(p => {
+      if (!p.normal) return false;
+
+      const intimacy = p.intimacy !== undefined ? p.intimacy : p.intimacyScore;
+
+      // Must be higher intimacy and not blocked
+      return intimacy > originalIntimacy && intimacy > 30;
+    });
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    // Sort by intimacy (highest first)
+    candidates.sort((a, b) => {
+      const aInt = a.intimacy !== undefined ? a.intimacy : a.intimacyScore;
+      const bInt = b.intimacy !== undefined ? b.intimacy : b.intimacyScore;
+      return bInt - aInt;
+    });
+
+    return candidates[0];
+  }
+
+  /**
+   * Check if destination requires replacement popup
+   * @param {Object} destPlace - Destination place
+   * @returns {boolean} - true if popup should show
+   */
+  shouldShowReplacementPopup(destPlace) {
+    if (!destPlace) return false;
+
+    const intimacy = destPlace.intimacy !== undefined ? destPlace.intimacy : destPlace.intimacyScore;
+
+    // Show popup only if very low intimacy (< 6)
+    return intimacy !== undefined && intimacy < 6;
   }
 }

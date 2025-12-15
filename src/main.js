@@ -1119,13 +1119,12 @@ class MapView {
       },
       (error) => {
         // Error callback
-        console.error('❌ GPS Error:', error.message);
-
         let errorMessage = 'GPS 위치를 가져올 수 없습니다.';
         let shouldShowMessage = false;
 
         switch(error.code) {
           case error.PERMISSION_DENIED:
+            console.error('❌ GPS Error: Permission denied');
             errorMessage = 'GPS 권한이 거부되었습니다. 브라우저 설정에서 위치 권한을 허용해주세요.';
             shouldShowMessage = true;
             this.isGPSActive = false;
@@ -1136,14 +1135,15 @@ class MapView {
             }
             break;
           case error.POSITION_UNAVAILABLE:
+            console.error('❌ GPS Error: Position unavailable');
             errorMessage = 'GPS 위치를 사용할 수 없습니다.';
             shouldShowMessage = !this.hasShownGPSError; // Show once
             this.hasShownGPSError = true;
             this.isGPSActive = false;
             break;
           case error.TIMEOUT:
-            // Timeout is common - don't show message, just retry silently
-            console.log('⏱️ GPS timeout - will retry automatically');
+            // Timeout is common - don't show error, just log and retry silently
+            console.log('⏱️ GPS timeout - retrying automatically');
             shouldShowMessage = false;
             break;
         }
@@ -1715,9 +1715,24 @@ class MapView {
       this.sphereUniforms.uTime.value += 0.01;
     }
 
+    // Destination marker removed per user request
+    // (Previously showed pulsing blue marker at destination)
+
     // Update audio based on user position (realtime)
     if (this.userMarker && this.userMarker.position) {
-      this.audioManager.update(this.userMarker.position);
+      // Convert Vector3 to plain object for audio manager
+      const userNormal = {
+        x: this.userMarker.position.x,
+        y: this.userMarker.position.y,
+        z: this.userMarker.position.z
+      };
+
+      this.audioManager.update(userNormal);
+
+      // Update navigation progress if active
+      if (this.currentPath) {
+        this.updateProgress(userNormal);
+      }
     }
 
     this.renderer.render(this.scene, this.camera);
@@ -1865,7 +1880,39 @@ class MapView {
     this.addPlaceMarker(placeData);
 
     // Update PathFinder and AudioManager with new places
-    this.pathFinder.setPlaces(this.placeholders);
+    // Pass height field function to PathFinder
+    const getHeightAtFunc = (normal) => {
+      if (!this.sphereUniforms || !this.sphereUniforms.uPlacePositions) return 0;
+
+      // Sample height from shader uniforms
+      let height = 0;
+      const placeCount = Math.min(this.sphereUniforms.uPlacesCount.value, this.placeholders.length);
+
+      for (let i = 0; i < placeCount; i++) {
+        const placeNormal = this.sphereUniforms.uPlacePositions.value[i];
+        if (!placeNormal) continue;
+
+        const angle = Math.acos(Math.min(1, Math.max(-1,
+          normal.x * placeNormal.x + normal.y * placeNormal.y + normal.z * placeNormal.z
+        )));
+
+        const influence = Math.max(0, 1 - angle / (Math.PI / 4));
+        const placeHeight = this.sphereUniforms.uPlaceHeights ? this.sphereUniforms.uPlaceHeights.value[i] : 0;
+        height += placeHeight * influence;
+      }
+
+      return height;
+    };
+
+    // Add normal vectors to placeholders for PathFinder
+    this.placeholders.forEach(place => {
+      if (!place.normal && place.latitude !== undefined && place.longitude !== undefined) {
+        const vec3 = this.latLonToVector3(place.latitude, place.longitude, 1.0).normalize();
+        place.normal = { x: vec3.x, y: vec3.y, z: vec3.z };
+      }
+    });
+
+    this.pathFinder.setPlaces(this.placeholders, getHeightAtFunc);
     this.audioManager.setPlaces(this.placeholders);
   }
 
@@ -2128,7 +2175,39 @@ class MapView {
       });
 
       // Update PathFinder and AudioManager with loaded places
-      this.pathFinder.setPlaces(this.placeholders);
+      // Pass height field function to PathFinder
+      const getHeightAtFunc = (normal) => {
+        if (!this.sphereUniforms || !this.sphereUniforms.uPlacePositions) return 0;
+
+        // Sample height from shader uniforms
+        let height = 0;
+        const placeCount = Math.min(this.sphereUniforms.uPlacesCount.value, this.placeholders.length);
+
+        for (let i = 0; i < placeCount; i++) {
+          const placeNormal = this.sphereUniforms.uPlacePositions.value[i];
+          if (!placeNormal) continue;
+
+          const angle = Math.acos(Math.min(1, Math.max(-1,
+            normal.x * placeNormal.x + normal.y * placeNormal.y + normal.z * placeNormal.z
+          )));
+
+          const influence = Math.max(0, 1 - angle / (Math.PI / 4));
+          const placeHeight = this.sphereUniforms.uPlaceHeights ? this.sphereUniforms.uPlaceHeights.value[i] : 0;
+          height += placeHeight * influence;
+        }
+
+        return height;
+      };
+
+      // Add normal vectors to placeholders for PathFinder
+      this.placeholders.forEach(place => {
+        if (!place.normal && place.latitude !== undefined && place.longitude !== undefined) {
+          const vec3 = this.latLonToVector3(place.latitude, place.longitude, 1.0).normalize();
+          place.normal = { x: vec3.x, y: vec3.y, z: vec3.z };
+        }
+      });
+
+      this.pathFinder.setPlaces(this.placeholders, getHeightAtFunc);
       this.audioManager.setPlaces(this.placeholders);
 
       console.log(`📍 ✅ Successfully loaded ${this.placeholders.length} place(s) from Firebase`);
@@ -2412,8 +2491,42 @@ class MapView {
       place.glowSprite3D.material.dispose();
     }
 
-    // Update PathFinder
-    this.pathFinder.setPlaces(this.placeholders);
+    // Add normal vectors to placeholders for PathFinder
+    this.placeholders.forEach(place => {
+      if (!place.normal && place.latitude !== undefined && place.longitude !== undefined) {
+        const vec3 = this.latLonToVector3(place.latitude, place.longitude, 1.0).normalize();
+        place.normal = { x: vec3.x, y: vec3.y, z: vec3.z };
+      }
+    });
+
+    // Update PathFinder with height field function
+    const getHeightAtFunc = (normal) => {
+      if (!this.sphereUniforms || !this.sphereUniforms.uPlacePositions) return 0;
+
+      // Sample height from shader uniforms
+      let height = 0;
+      const placeCount = Math.min(this.sphereUniforms.uPlacesCount.value, this.placeholders.length);
+
+      for (let i = 0; i < placeCount; i++) {
+        const placeNormal = this.sphereUniforms.uPlacePositions.value[i];
+        if (!placeNormal) continue;
+
+        const angle = Math.acos(Math.min(1, Math.max(-1,
+          normal.x * placeNormal.x + normal.y * placeNormal.y + normal.z * placeNormal.z
+        )));
+
+        const influence = Math.max(0, 1 - angle / (Math.PI / 4));
+        if (influence > 0) {
+          const intimacy = this.sphereUniforms.uPlaceIntimacy.value[i] || 0;
+          const distortionStrength = (intimacy - 50) / 100;
+          height += distortionStrength * 0.3 * influence;
+        }
+      }
+
+      return height;
+    };
+
+    this.pathFinder.setPlaces(this.placeholders, getHeightAtFunc);
   }
 
   editPlaceMandala(place) {
@@ -2663,6 +2776,9 @@ class MapView {
     const modal = document.getElementById('navigation-modal');
     const select = document.getElementById('destination-select');
 
+    console.log('[DEBUG] Navigation 모달 열림');
+    console.log('[DEBUG] placeholders 개수:', this.placeholders.length);
+
     // Clear and populate destination options
     select.innerHTML = '<option value="">목적지를 선택하세요...</option>';
 
@@ -2676,8 +2792,10 @@ class MapView {
     if (this.placeholders.length === 0) {
       select.innerHTML = '<option value="">장소를 먼저 추가하세요...</option>';
       select.disabled = true;
+      console.log('[DEBUG] 장소가 없어서 선택 비활성화');
     } else {
       select.disabled = false;
+      console.log('[DEBUG] 선택 활성화, 옵션 개수:', select.options.length);
     }
 
     // Reset UI
@@ -2713,6 +2831,7 @@ class MapView {
     // Destination selection
     select.addEventListener('change', () => {
       const index = parseInt(select.value);
+      console.log('[DEBUG] 목적지 선택됨, index:', index);
       if (isNaN(index)) {
         document.getElementById('zone-info').classList.add('hidden');
         document.getElementById('reachability-warning').classList.add('hidden');
@@ -2723,21 +2842,25 @@ class MapView {
 
       const destination = this.placeholders[index];
       this.selectedDestination = destination;
+      console.log('[DEBUG] selectedDestination 설정됨:', destination);
 
       // Show zone info
       this.showZoneInfo(destination);
 
       // Check reachability
       const reachability = checkDestinationReachability(destination, this.placeholders);
+      console.log('[DEBUG] reachability:', reachability);
       this.showReachabilityInfo(reachability);
 
       // Show route preview if reachable
       if (reachability.reachable) {
         this.showRoutePreview(destination);
         startBtn.disabled = false;
+        console.log('[DEBUG] 버튼 활성화됨');
       } else {
         document.getElementById('route-preview').classList.add('hidden');
         startBtn.disabled = true;
+        console.log('[DEBUG] 버튼 비활성화됨 (도달 불가능)');
       }
     });
 
@@ -2752,9 +2875,13 @@ class MapView {
 
     // Start navigation
     startBtn.addEventListener('click', () => {
+      console.log('[DEBUG] 길 안내 시작 버튼 클릭됨');
+      console.log('[DEBUG] selectedDestination:', this.selectedDestination);
       if (this.selectedDestination) {
         this.startNavigation(this.selectedDestination);
         closeModal();
+      } else {
+        console.error('[DEBUG] selectedDestination이 없습니다!');
       }
     });
   }
@@ -2860,72 +2987,276 @@ class MapView {
   }
 
   /**
+   * Validate destination before navigation
+   * Returns {ok: boolean, reason: string, destNormal: Vector3}
+   */
+  validateDestination(dest) {
+    console.log('[NAV] ===== Destination Validation =====');
+    console.log('[NAV] dest:', dest);
+    console.log('[NAV] userGPS:', this.userGPS);
+
+    // Condition 1: dest is null or undefined
+    if (!dest) {
+      console.error('[NAV] ❌ FAIL: destination is null/undefined');
+      return { ok: false, reason: '목적지가 유효하지 않습니다.', destNormal: null };
+    }
+
+    // Condition 2: Missing latitude or longitude
+    if (dest.latitude === undefined || dest.longitude === undefined ||
+        dest.latitude === null || dest.longitude === null) {
+      console.error('[NAV] ❌ FAIL: missing lat/lng');
+      return { ok: false, reason: '목적지 좌표가 없습니다.', destNormal: null };
+    }
+
+    // Calculate destination normal vector
+    const destVec3 = this.latLonToVector3(dest.latitude, dest.longitude, 1.0).normalize();
+
+    // Convert Vector3 to plain object
+    const destNormal = {
+      x: destVec3.x,
+      y: destVec3.y,
+      z: destVec3.z
+    };
+
+    // Condition 3: destNormal contains NaN
+    if (isNaN(destNormal.x) || isNaN(destNormal.y) || isNaN(destNormal.z)) {
+      console.error('[NAV] ❌ FAIL: destNormal contains NaN');
+      console.error('[NAV] destNormal:', destNormal);
+      return { ok: false, reason: '목적지 벡터 계산 실패.', destNormal: null };
+    }
+
+    const destNormalLen = Math.sqrt(
+      destNormal.x * destNormal.x +
+      destNormal.y * destNormal.y +
+      destNormal.z * destNormal.z
+    );
+    console.log('[NAV] destNormalLen:', destNormalLen);
+
+    // All checks passed
+    console.log('[NAV] ✅ PASS: destination is valid');
+    return { ok: true, reason: '', destNormal: destNormal };
+  }
+
+  /**
    * Start navigation with emotional pathfinding
    */
   startNavigation(destination) {
     console.log(`🧭 Starting navigation to: ${destination.name || 'destination'}`);
-    console.log(`   Destination: ${destination.latitude.toFixed(4)}°N, ${destination.longitude.toFixed(4)}°E`);
-    console.log(`   Intimacy: ${destination.intimacy}%`);
-    console.log(`   Zone type: ${getZoneType(destination)}`);
+    console.log(`[NAV] Destination coords: lat=${destination.latitude}, lon=${destination.longitude}`);
+    console.log(`[NAV] User coords: lat=${this.userGPS.latitude}, lon=${this.userGPS.longitude}`);
 
-    // Store current destination for later use
-    this.currentDestination = destination;
-
-    // Use A* pathfinding with emotional weights
-    const pathResult = this.pathFinder.findPathAStar(
-      this.userGPS.latitude,
-      this.userGPS.longitude,
-      destination.latitude,
-      destination.longitude
-    );
-
-    if (!pathResult.valid) {
-      alert(`⚠️ 경로를 찾을 수 없습니다\n\n${pathResult.warning}`);
-
-      if (pathResult.alternative) {
-        const useAlt = confirm(`대신 "${pathResult.alternative.name}"로 안내할까요?`);
-        if (useAlt) {
-          // Find the alternative place object
-          const altPlace = this.placeholders.find(p =>
-            p.latitude === pathResult.alternative.lat &&
-            p.longitude === pathResult.alternative.lng
-          );
-          if (altPlace) {
-            this.startNavigation(altPlace);
-          }
-        }
-      }
+    // Validate destination
+    const validation = this.validateDestination(destination);
+    if (!validation.ok) {
+      alert(`⚠️ ${validation.reason}`);
       return;
     }
 
-    // Store current path
+    // Store validated destination normal
+    destination.normal = validation.destNormal;
+    console.log(`[NAV] Stored destination.normal: (${destination.normal.x.toFixed(3)}, ${destination.normal.y.toFixed(3)}, ${destination.normal.z.toFixed(3)})`);
+
+    // Store current destination
+    this.currentDestination = destination;
+
+    // Check if destination requires replacement popup
+    if (this.pathFinder.shouldShowReplacementPopup(destination)) {
+      this.showDestinationReplacementPopup(destination);
+      return;
+    }
+
+    // Directly proceed with navigation (high intimacy destination)
+    this.proceedWithNavigation(destination);
+  }
+
+  /**
+   * Show "I want to live happily" destination replacement popup
+   * Only shown for low intimacy destinations
+   */
+  showDestinationReplacementPopup(destination) {
+    const modal = document.getElementById('destination-replacement-modal');
+    modal.classList.remove('hidden');
+
+    // Both buttons do the same thing (both are "Yes")
+    const handler = () => {
+      modal.classList.add('hidden');
+      this.attemptDestinationReplacement(destination);
+    };
+
+    document.getElementById('replace-dest-yes1').onclick = handler;
+    document.getElementById('replace-dest-yes2').onclick = handler;
+  }
+
+  /**
+   * Attempt to replace low intimacy destination with better alternative
+   */
+  attemptDestinationReplacement(originalDestination) {
+    // Convert user position to plain object
+    const userNormal = {
+      x: this.userMarker.position.x,
+      y: this.userMarker.position.y,
+      z: this.userMarker.position.z
+    };
+
+    const alternative = this.pathFinder.findAlternativeDestination(
+      userNormal,
+      originalDestination
+    );
+
+    if (alternative) {
+      console.log('[NAV] dest replaced:', originalDestination?.name, '->', alternative?.name);
+      alert(`지금 상태로는 "${originalDestination.name}"보다 "${alternative.name}"이(가) 더 가까운 목적지입니다.`);
+      this.proceedWithNavigation(alternative);
+    } else {
+      console.warn('[NAV] No alternative destination found');
+      alert('목적지를 변경할 수 없습니다. 경로가 존재하지 않습니다.');
+    }
+  }
+
+  /**
+   * Proceed with navigation (after popup or directly for high intimacy)
+   */
+  proceedWithNavigation(destination) {
+    console.log(`🧭 Computing path to: ${destination.name}`);
+
+    // Convert user position to plain object
+    const userNormal = {
+      x: this.userMarker.position.x,
+      y: this.userMarker.position.y,
+      z: this.userMarker.position.z
+    };
+
+    // Compute path using physics-based pathfinding
+    const pathResult = this.pathFinder.computePath(
+      userNormal,
+      destination
+    );
+
+    if (!pathResult.valid) {
+      alert(`⚠️ 경로가 존재하지 않습니다.\n\n${pathResult.warning}`);
+      return;
+    }
+
+    // Store current path and destination
     this.currentPath = pathResult.path;
+    this.currentDestination = destination;
+    this.navigationProgress = 0;
 
-    // Visualize route on 3D sphere
-    this.visualizeRoute3D(pathResult.path, destination);
-
-    // Start audio updates
-    this.startAudioUpdates();
+    // Render blue path line on sphere
+    this.renderPath(pathResult.path);
 
     // Show navigation stop button
     this.showNavigationStopButton();
 
-    console.log(`✅ Route calculated:`);
-    console.log(`   Distance: ${(pathResult.totalDistance / 1000).toFixed(2)} km`);
-    console.log(`   Emotional cost: ${pathResult.emotionalCost.toFixed(2)}`);
-    console.log(`   Waypoints: ${pathResult.path.length}`);
+    // Start audio updates
+    this.startAudioUpdates();
 
-    const distanceText = pathResult.totalDistance < 1000
-      ? `${pathResult.totalDistance.toFixed(0)}m`
-      : `${(pathResult.totalDistance / 1000).toFixed(2)}km`;
+    // Show fallback warning if using relaxed slope limit
+    if (pathResult.isFallback && pathResult.warning) {
+      this.showNavigationMessage(pathResult.warning);
+    }
 
-    const emotionalCostText = pathResult.emotionalCost < 0.5
-      ? '✅ 매우 편안한 길'
-      : pathResult.emotionalCost < 1
-        ? '⚠️ 보통'
-        : '❌ 불편한 길';
+    console.log(`✅ Navigation started to ${destination.name}`);
+    console.log(`   Path segments: ${pathResult.path.length}`);
+    console.log(`   Total angle: ${(pathResult.totalAngle * 180 / Math.PI).toFixed(1)}°`);
+    console.log(`   Fallback path: ${pathResult.isFallback ? 'YES' : 'NO'}`);
+  }
 
-    alert(`🧭 길 안내 시작!\n\n목적지: ${destination.name || '선택한 장소'}\n실제 거리: ${distanceText}\n경유 지점: ${pathResult.path.length}개\n\n감정적 비용: ${emotionalCostText}\n\n💡 3D 지도에서 경로를 확인하세요!`);
+  /**
+   * Render path (destination marker removed per user request)
+   * Path validation handled by PathFinder
+   */
+  renderPath(pathNormals) {
+    console.log('[NAV] Path computed, no visual marker rendered');
+    console.log(`[NAV] Destination: ${this.currentDestination?.name}`);
+    console.log(`[NAV] Path segments: ${pathNormals.length}`);
+
+    // Remove old destination marker if exists
+    if (this.destinationMarker) {
+      if (this.destinationMarker.geometry) this.destinationMarker.geometry.dispose();
+      if (this.destinationMarker.material) this.destinationMarker.material.dispose();
+      this.scene.remove(this.destinationMarker);
+      this.destinationMarker = null;
+    }
+
+    // No visual rendering - only progress tracking via updateProgress()
+  }
+
+  /**
+   * Update navigation progress (called in animate loop)
+   */
+  updateProgress(userNormal) {
+    if (!this.currentPath || !this.currentDestination) return;
+
+    // Calculate distance to destination
+    const destNormal = this.currentPath[this.currentPath.length - 1];
+    const angleToDestination = Math.acos(Math.min(1, Math.max(-1,
+      userNormal.x * destNormal.x + userNormal.y * destNormal.y + userNormal.z * destNormal.z
+    )));
+
+    // Convert to approximate meters (assuming Earth radius ~6371 km)
+    const distanceMeters = angleToDestination * 6371000;
+
+    // Find closest point on path
+    let closestIndex = 0;
+    let minAngle = Infinity;
+
+    for (let i = 0; i < this.currentPath.length; i++) {
+      const pathNormal = this.currentPath[i];
+      const angle = Math.acos(Math.min(1, Math.max(-1,
+        userNormal.x * pathNormal.x + userNormal.y * pathNormal.y + userNormal.z * pathNormal.z
+      )));
+
+      if (angle < minAngle) {
+        minAngle = angle;
+        closestIndex = i;
+      }
+    }
+
+    const prevProgress = this.navigationProgress;
+    this.navigationProgress = closestIndex;
+
+    // Fix: Use (length - 1) to allow reaching 100%
+    const progressPercent = ((closestIndex / (this.currentPath.length - 1)) * 100).toFixed(0);
+    let distanceText;
+    if (distanceMeters >= 1000) {
+      distanceText = `${(distanceMeters / 1000).toFixed(1)}km`;
+    } else {
+      distanceText = `${distanceMeters.toFixed(0)}m`;
+    }
+
+    // Debug logging to verify percentage increases as user moves toward destination
+    console.log(`[NAV PROGRESS] closestIndex: ${closestIndex}/${this.currentPath.length - 1} (${progressPercent}%), distance: ${distanceText}`);
+
+    this.showNavigationMessage(`"${this.currentDestination.name}"까지 ${distanceText} (경로 ${progressPercent}%)`);
+
+    // Trigger narrative messages at certain progress points
+    if (prevProgress < this.currentPath.length * 0.25 && closestIndex >= this.currentPath.length * 0.25) {
+      this.showNavigationMessage("여기서부터는 내려갈 수 있지만, 돌아갈 수는 없다.");
+    } else if (prevProgress < this.currentPath.length * 0.5 && closestIndex >= this.currentPath.length * 0.5) {
+      this.showNavigationMessage("지금 당신은 걷고 있지만, 접근하고 있진 않다.");
+    } else if (prevProgress < this.currentPath.length * 0.75 && closestIndex >= this.currentPath.length * 0.75) {
+      this.showNavigationMessage("경로가 이어지는 것은 허락이 아니라 습관이다.");
+    }
+
+    // Check if reached destination (within 50 meters)
+    if (distanceMeters < 50) {
+      this.showNavigationMessage(`"${this.currentDestination.name}"에 도착했습니다.`);
+      this.stopNavigation();
+    }
+  }
+
+  /**
+   * Show narrative navigation message
+   */
+  showNavigationMessage(message) {
+    const messageEl = document.getElementById('nav-progress-message');
+    messageEl.textContent = message;
+    messageEl.classList.remove('hidden');
+
+    setTimeout(() => {
+      messageEl.classList.add('hidden');
+    }, 4000);
   }
 
   /**
@@ -2989,7 +3320,23 @@ class MapView {
   stopNavigation() {
     console.log('🛑 Stopping navigation...');
 
-    // Clear route visualization
+    // Clear destination marker
+    if (this.destinationMarker) {
+      this.scene.remove(this.destinationMarker);
+      this.destinationMarker.geometry.dispose();
+      this.destinationMarker.material.dispose();
+      this.destinationMarker = null;
+    }
+
+    // Clear old path line (legacy)
+    if (this.pathLine) {
+      this.scene.remove(this.pathLine);
+      if (this.pathLine.geometry) this.pathLine.geometry.dispose();
+      if (this.pathLine.material) this.pathLine.material.dispose();
+      this.pathLine = null;
+    }
+
+    // Clear old route line (if exists)
     if (this.currentRouteLine) {
       this.scene.remove(this.currentRouteLine);
       this.currentRouteLine = null;
@@ -3001,12 +3348,12 @@ class MapView {
     // Clear destination and path
     this.currentDestination = null;
     this.currentPath = null;
+    this.navigationProgress = 0;
 
     // Hide stop button
     this.hideNavigationStopButton();
 
     console.log('✅ Navigation stopped');
-    alert('길 안내가 종료되었습니다.');
   }
 
   /**
