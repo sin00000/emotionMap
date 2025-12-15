@@ -1,232 +1,388 @@
+/**
+ * AudioManager - Emotion-based BGM system
+ *
+ * Core principle: Routes without music DO NOT EXIST.
+ * - Avoidance zones = silence zones (no passage)
+ * - Closer to silence zone → volume decreases
+ * - Multiple keywords → sequential playback (NOT mixing)
+ * - Neutral state (far from all places) → drone oscillator
+ */
+
 export class AudioManager {
   constructor() {
-    this.mainBGM = null;
-    this.themeSongs = new Map(); // placeId -> Audio object
-    this.currentVolumes = new Map(); // placeId -> volume (0-1)
-    this.masterVolume = 0.7;
-    this.fadeSpeed = 0.02;
-    this.proximityThreshold = 100; // meters (simulated)
-    this.muteZoneRadius = 50; // meters (simulated)
-    this.isInMuteZone = false;
-    this.animationFrame = null;
+    // Place data
+    this.places = [];
+    this.userNormal = null;
 
-    this.init();
-  }
+    // Active track state
+    this.activePlaceId = null;
+    this.activeKeywords = [];
+    this.currentKeywordIndex = 0;
+    this.currentAudio = null;
 
-  init() {
-    // Create main background music (if available)
-    // You can add a default ambient track here
-    this.setupMainBGM();
-  }
+    // Neutral state (drone oscillator)
+    this.isNeutral = false;
+    this.droneOscillator = null;
+    this.droneGain = null;
+    this.audioContext = null;
+    this.droneLFO = null;
 
-  setupMainBGM() {
-    // Optional: Load a default ambient track
-    // this.mainBGM = new Audio('song/ambient.mp3');
-    // this.mainBGM.loop = true;
-    // this.mainBGM.volume = 0;
-  }
+    // Volume control
+    this.currentVolume = 1.0;
+    this.masterVolume = 1.0;
 
-  playMainBGM() {
-    if (this.mainBGM && this.mainBGM.paused) {
-      this.mainBGM.play().catch(e => console.warn('Could not play main BGM:', e));
-    }
-  }
-
-  stopMainBGM() {
-    if (this.mainBGM) {
-      this.mainBGM.pause();
-      this.mainBGM.currentTime = 0;
-    }
-  }
-
-  // Load theme song for a place
-  loadThemeSong(placeId, songURL) {
-    if (!songURL || this.themeSongs.has(placeId)) {
-      return;
-    }
-
-    try {
-      const audio = new Audio(songURL);
-      audio.loop = true;
-      audio.volume = 0;
-      audio.preload = 'auto';
-
-      this.themeSongs.set(placeId, audio);
-      this.currentVolumes.set(placeId, 0);
-
-      // Preload the audio
-      audio.load();
-    } catch (error) {
-      console.warn(`Could not load theme song for place ${placeId}:`, error);
-    }
-  }
-
-  // Load all theme songs from places
-  loadAllThemeSongs(places) {
-    places.forEach(place => {
-      if (place.themeSongURL) {
-        this.loadThemeSong(place.placeId, place.themeSongURL);
-      }
-    });
-  }
-
-  // Calculate distance between two GPS coordinates (simplified)
-  calculateDistance(lat1, lng1, lat2, lng2) {
-    const R = 6371e3; // Earth radius in meters
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lng2 - lng1) * Math.PI / 180;
-
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-    return R * c; // Distance in meters
-  }
-
-  // Update audio based on user location
-  updateAudioForLocation(userLocation, places) {
-    let inMuteZone = false;
-    const targetVolumes = new Map();
-
-    places.forEach(place => {
-      const distance = this.calculateDistance(
-        userLocation.lat,
-        userLocation.lng,
-        place.latitude,
-        place.longitude
-      );
-
-      // Check if in avoidance/mute zone
-      const isAvoidanceZone = place.emotionKeywords.includes('avoidance') || place.intimacyScore < 20;
-      if (isAvoidanceZone && distance < this.muteZoneRadius) {
-        inMuteZone = true;
-      }
-
-      // Calculate target volume based on proximity
-      let targetVolume = 0;
-
-      if (distance < this.proximityThreshold) {
-        // Fade in based on proximity
-        const proximityFactor = 1 - (distance / this.proximityThreshold);
-        targetVolume = proximityFactor * this.masterVolume;
-
-        // Adjust volume based on intimacy score
-        targetVolume *= (place.intimacyScore / 100);
-      }
-
-      targetVolumes.set(place.placeId, targetVolume);
-    });
-
-    // Apply mute zone
-    if (inMuteZone) {
-      this.isInMuteZone = true;
-      // Fade all audio to silence
-      targetVolumes.forEach((vol, placeId) => {
-        targetVolumes.set(placeId, 0);
-      });
-
-      // Fade main BGM to silence
-      if (this.mainBGM) {
-        this.fadeAudio(this.mainBGM, 0);
-      }
-    } else {
-      this.isInMuteZone = false;
-      // Restore main BGM
-      if (this.mainBGM) {
-        this.fadeAudio(this.mainBGM, this.masterVolume * 0.3);
-      }
-    }
-
-    // Apply smooth fade to all theme songs
-    targetVolumes.forEach((targetVol, placeId) => {
-      const audio = this.themeSongs.get(placeId);
-      if (audio) {
-        this.fadeAudio(audio, targetVol);
-
-        // Play audio if volume > 0 and not playing
-        if (targetVol > 0 && audio.paused) {
-          audio.play().catch(e => console.warn(`Could not play theme song for ${placeId}:`, e));
-        }
-
-        // Pause audio if volume is 0
-        if (targetVol === 0 && !audio.paused && audio.volume < 0.01) {
-          audio.pause();
-        }
-      }
-    });
-  }
-
-  // Smooth fade audio to target volume
-  fadeAudio(audio, targetVolume) {
-    if (!audio) return;
-
-    const currentVolume = audio.volume;
-    const volumeDiff = targetVolume - currentVolume;
-
-    if (Math.abs(volumeDiff) < 0.01) {
-      audio.volume = targetVolume;
-      return;
-    }
-
-    const step = volumeDiff > 0 ? this.fadeSpeed : -this.fadeSpeed;
-    const newVolume = Math.max(0, Math.min(1, currentVolume + step));
-    audio.volume = newVolume;
-  }
-
-  // Start continuous audio update loop
-  startAudioLoop(getUserLocation, getPlaces) {
-    const updateLoop = () => {
-      const userLocation = getUserLocation();
-      const places = getPlaces();
-
-      if (userLocation && places) {
-        this.updateAudioForLocation(userLocation, places);
-      }
-
-      this.animationFrame = requestAnimationFrame(updateLoop);
+    // Song counts per emotion keyword (adjust if needed)
+    this.songCounts = {
+      calm: 3,
+      affection: 3,
+      anxiety: 3,
+      avoidance: 3,
+      emptiness: 3,
+      impulse: 3,
+      tension: 3
     };
 
-    updateLoop();
+    console.log('🎵 AudioManager initialized');
   }
 
-  // Stop audio loop
-  stopAudioLoop() {
-    if (this.animationFrame) {
-      cancelAnimationFrame(this.animationFrame);
-      this.animationFrame = null;
+  /**
+   * Pick random song for a keyword
+   * @param {string} keyword - Emotion keyword (calm, affection, etc.)
+   * @returns {string} - Song URL (/song/{keyword}{n}.mp3)
+   */
+  pickRandomSong(keyword) {
+    const count = this.songCounts[keyword] || 1;
+    const randomNum = Math.floor(Math.random() * count) + 1;
+    const url = `/song/${keyword}${randomNum}.mp3`;
+    console.log(`🎵 Selected: ${url}`);
+    return url;
+  }
+
+  /**
+   * ⭐ CORE FUNCTION: Play next keyword track
+   * Uses onended event to cycle through keywords sequentially
+   * ❌ NO setTimeout/timers
+   * ⭕ Only onended triggers next track
+   */
+  playNextKeywordTrack() {
+    if (!this.activeKeywords || this.activeKeywords.length === 0) {
+      console.log('🎵 No active keywords, stopping track');
+      this.stopTrack();
+      return;
+    }
+
+    const keyword = this.activeKeywords[this.currentKeywordIndex];
+    const url = this.pickRandomSong(keyword);
+
+    const audio = new Audio(url);
+    audio.volume = this.currentVolume * this.masterVolume;
+    audio.loop = false; // ❌ NO LOOP - use onended
+
+    // ⭐ onended: Trigger next track when current track finishes
+    audio.onended = () => {
+      console.log(`🎵 Track ended: ${keyword}, moving to next`);
+      this.currentKeywordIndex = (this.currentKeywordIndex + 1) % this.activeKeywords.length;
+      this.playNextKeywordTrack(); // 🔥 Recursive call on track end
+    };
+
+    audio.onerror = (e) => {
+      console.warn(`❌ Failed to load ${url}:`, e);
+      // On error, skip to next keyword
+      this.currentKeywordIndex = (this.currentKeywordIndex + 1) % this.activeKeywords.length;
+      this.playNextKeywordTrack();
+    };
+
+    // Stop previous track
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio.onended = null;
+      this.currentAudio = null;
+    }
+
+    this.currentAudio = audio;
+    audio.play().catch(e => console.warn('Could not play audio:', e));
+
+    console.log(`🎵 Now playing: ${keyword} (${this.currentKeywordIndex + 1}/${this.activeKeywords.length})`);
+  }
+
+  /**
+   * Start neutral drone oscillator
+   * Specs: sine wave, 45-70Hz, LFO modulation
+   * @param {number} volume - Drone volume (0-1)
+   */
+  startNeutralDrone(volume) {
+    if (!this.audioContext) {
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    if (this.droneOscillator) {
+      this.stopNeutralDrone();
+    }
+
+    // Main oscillator (low drone)
+    this.droneOscillator = this.audioContext.createOscillator();
+    this.droneOscillator.type = 'sine';
+    this.droneOscillator.frequency.value = 55; // 55Hz base frequency
+
+    // LFO for subtle frequency modulation
+    this.droneLFO = this.audioContext.createOscillator();
+    this.droneLFO.type = 'sine';
+    this.droneLFO.frequency.value = 0.2; // 0.2Hz (slow wobble)
+
+    const lfoGain = this.audioContext.createGain();
+    lfoGain.gain.value = 5; // ±5Hz modulation
+
+    this.droneLFO.connect(lfoGain);
+    lfoGain.connect(this.droneOscillator.frequency);
+
+    // Volume control
+    this.droneGain = this.audioContext.createGain();
+    this.droneGain.gain.value = volume;
+
+    this.droneOscillator.connect(this.droneGain);
+    this.droneGain.connect(this.audioContext.destination);
+
+    this.droneOscillator.start();
+    this.droneLFO.start();
+
+    console.log(`🎵 Neutral drone started (volume: ${volume.toFixed(3)})`);
+  }
+
+  /**
+   * Stop neutral drone
+   */
+  stopNeutralDrone() {
+    if (this.droneOscillator) {
+      try {
+        this.droneOscillator.stop();
+        this.droneOscillator.disconnect();
+      } catch (e) {
+        // Already stopped
+      }
+      this.droneOscillator = null;
+    }
+    if (this.droneLFO) {
+      try {
+        this.droneLFO.stop();
+        this.droneLFO.disconnect();
+      } catch (e) {
+        // Already stopped
+      }
+      this.droneLFO = null;
+    }
+    if (this.droneGain) {
+      this.droneGain.disconnect();
+      this.droneGain = null;
     }
   }
 
-  // Cleanup
-  cleanup() {
-    this.stopAudioLoop();
-    this.stopMainBGM();
-
-    this.themeSongs.forEach(audio => {
-      audio.pause();
-      audio.src = '';
-    });
-
-    this.themeSongs.clear();
-    this.currentVolumes.clear();
+  /**
+   * Set places data
+   * @param {Array} places - Array of place objects with emotionKeywords, normal, intimacy
+   */
+  setPlaces(places) {
+    this.places = places;
+    console.log(`🎵 AudioManager: ${places.length} places loaded`);
   }
 
-  // Set master volume
+  /**
+   * ⭐ MAIN UPDATE FUNCTION
+   * Called when user position changes
+   * @param {Object} userNormal - User's position normal vector {x, y, z}
+   */
+  update(userNormal) {
+    if (!userNormal) return;
+
+    this.userNormal = userNormal;
+
+    if (!this.places || this.places.length === 0) {
+      this.enterNeutralState(0);
+      return;
+    }
+
+    // Calculate weights for all places
+    const weights = this.places.map(place => {
+      if (!place.normal) return 0;
+      const angle = this.calculateAngle(userNormal, place.normal);
+      const R = Math.PI / 6; // ~30 degrees influence radius
+      return this.smoothstep(R, 0, angle);
+    });
+
+    const wMax = Math.max(...weights);
+
+    // Neutral state check (far from all places)
+    if (wMax < 0.15) {
+      this.enterNeutralState(wMax);
+      return;
+    }
+
+    // Find closest place
+    const maxIndex = weights.indexOf(wMax);
+    const closestPlace = this.places[maxIndex];
+
+    // ⭐ Mute zone check (avoidance or low intimacy)
+    const intimacy = closestPlace.intimacy !== undefined ? closestPlace.intimacy : closestPlace.intimacyScore;
+    const isBlocked = closestPlace.emotionKeywords?.includes('avoidance') || intimacy <= 30;
+
+    if (isBlocked) {
+      this.enterMuteZone(closestPlace.name);
+      return;
+    }
+
+    // Update volume based on distance
+    this.currentVolume = Math.min(1, Math.max(0, wMax));
+    if (this.currentAudio) {
+      this.currentAudio.volume = this.currentVolume * this.masterVolume;
+    }
+
+    // Fade out drone as place music fades in
+    if (this.droneGain) {
+      const droneVol = Math.max(0, (0.15 - wMax) / 0.15) * 0.25;
+      this.droneGain.gain.value = droneVol;
+
+      if (droneVol < 0.01) {
+        this.stopNeutralDrone();
+      }
+    }
+
+    // If place changed, start new track sequence
+    if (this.activePlaceId !== closestPlace.placeId) {
+      console.log(`🎵 Entering new place: ${closestPlace.name} (${closestPlace.placeId})`);
+      this.activePlaceId = closestPlace.placeId;
+      this.activeKeywords = closestPlace.emotionKeywords || [];
+      this.currentKeywordIndex = 0;
+
+      this.isNeutral = false;
+
+      if (this.activeKeywords.length > 0) {
+        this.playNextKeywordTrack();
+      } else {
+        console.warn(`⚠️ Place ${closestPlace.name} has no emotion keywords`);
+        this.stopTrack();
+      }
+    }
+  }
+
+  /**
+   * Enter neutral state (far from all places)
+   * Start drone oscillator, fade out theme music
+   * @param {number} wMax - Maximum weight (distance to closest place)
+   */
+  enterNeutralState(wMax = 0) {
+    if (this.isNeutral) {
+      // Already neutral, just update drone volume
+      if (this.droneGain) {
+        const droneVol = ((0.15 - wMax) / 0.15) * 0.25;
+        this.droneGain.gain.value = droneVol;
+      }
+      return;
+    }
+
+    console.log('🎵 Entering neutral state (white background)');
+    this.isNeutral = true;
+    this.activePlaceId = null;
+    this.activeKeywords = [];
+
+    // Fade out theme music
+    if (this.currentAudio) {
+      this.currentAudio.volume = 0;
+      setTimeout(() => {
+        if (this.currentAudio) {
+          this.currentAudio.pause();
+          this.currentAudio = null;
+        }
+      }, 500);
+    }
+
+    // Start drone
+    const droneVol = ((0.15 - wMax) / 0.15) * 0.25;
+    if (!this.droneOscillator) {
+      this.startNeutralDrone(droneVol);
+    } else if (this.droneGain) {
+      this.droneGain.gain.value = droneVol;
+    }
+  }
+
+  /**
+   * ⭐ Enter mute zone (avoidance/blocked place)
+   * All audio → 0, navigation blocked
+   * @param {string} placeName - Name of blocked place
+   */
+  enterMuteZone(placeName = 'unknown') {
+    console.warn(`🚫 무음 지대에 접근 중입니다: "${placeName}". 이 경로는 존재하지 않습니다.`);
+
+    this.masterVolume = 0;
+
+    if (this.currentAudio) {
+      this.currentAudio.volume = 0;
+      this.currentAudio.pause();
+    }
+
+    if (this.droneGain) {
+      this.droneGain.gain.value = 0;
+    }
+
+    // TODO: Block navigation UI (integrate with PathFinder)
+  }
+
+  /**
+   * Calculate spherical angle between two normal vectors
+   * @param {Object} v1 - Vector {x, y, z}
+   * @param {Object} v2 - Vector {x, y, z}
+   * @returns {number} - Angle in radians
+   */
+  calculateAngle(v1, v2) {
+    const dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+    return Math.acos(Math.min(1, Math.max(-1, dot)));
+  }
+
+  /**
+   * Smoothstep function for smooth falloff
+   * @param {number} edge0 - Start edge
+   * @param {number} edge1 - End edge
+   * @param {number} x - Input value
+   * @returns {number} - Smoothed value (0-1)
+   */
+  smoothstep(edge0, edge1, x) {
+    const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  /**
+   * Stop current track
+   */
+  stopTrack() {
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio.onended = null;
+      this.currentAudio = null;
+    }
+  }
+
+  /**
+   * Stop all audio (logout/cleanup)
+   */
+  stopAll() {
+    console.log('🎵 Stopping all audio');
+    this.stopTrack();
+    this.stopNeutralDrone();
+
+    this.activePlaceId = null;
+    this.activeKeywords = [];
+    this.currentKeywordIndex = 0;
+    this.isNeutral = false;
+    this.masterVolume = 1.0;
+    this.currentVolume = 1.0;
+  }
+
+  /**
+   * Set master volume
+   * @param {number} volume - Volume (0-1)
+   */
   setMasterVolume(volume) {
-    this.masterVolume = Math.max(0, Math.min(1, volume));
-  }
-
-  // Get current status
-  getStatus() {
-    return {
-      isInMuteZone: this.isInMuteZone,
-      activeSongs: Array.from(this.themeSongs.entries())
-        .filter(([id, audio]) => !audio.paused)
-        .map(([id]) => id),
-      volumes: Object.fromEntries(this.currentVolumes)
-    };
+    this.masterVolume = Math.min(1, Math.max(0, volume));
+    if (this.currentAudio) {
+      this.currentAudio.volume = this.currentVolume * this.masterVolume;
+    }
   }
 }

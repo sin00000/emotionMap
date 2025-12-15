@@ -513,6 +513,48 @@ function setupAuthListeners() {
   onAuthStateChanged(auth, async (user) => {
     if (user) {
       console.log('✅ User authenticated:', user.uid);
+
+      // Load user nickname from Firestore and display it
+      try {
+        console.log('🔍 Loading user nickname for uid:', user.uid);
+        const userDocRef = doc(db, 'users', user.uid);
+        const userDoc = await getDoc(userDocRef);
+        console.log('📄 User doc exists:', userDoc.exists());
+
+        let nickname = 'User';
+
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          console.log('📊 User data:', userData);
+          nickname = userData.nickname || 'User';
+        } else {
+          console.warn('⚠️ User document does not exist - creating default document');
+          // Create default user document
+          await setDoc(userDocRef, {
+            uid: user.uid,
+            nickname: 'User',
+            mandalaGraphicURL: '',
+            createdAt: new Date().toISOString()
+          });
+          console.log('✅ Created default user document');
+          nickname = 'User';
+        }
+
+        const nicknameEl = document.getElementById('user-nickname');
+        if (nicknameEl) {
+          nicknameEl.textContent = nickname;
+          console.log(`👤 User nickname set to: ${nickname}`);
+        } else {
+          console.error('❌ user-nickname element not found!');
+        }
+      } catch (error) {
+        console.error('❌ Error loading user nickname:', error);
+        const nicknameEl = document.getElementById('user-nickname');
+        if (nicknameEl) {
+          nicknameEl.textContent = 'User';
+        }
+      }
+
       showScreen('map');
 
       if (mapView) {
@@ -525,8 +567,10 @@ function setupAuthListeners() {
       }
     } else {
       showScreen('auth');
+      document.getElementById('user-nickname').textContent = '';
       if (mapView) {
         mapView.reset();
+        mapView.audioManager.stopAll(); // Stop all audio on logout
       }
     }
   });
@@ -820,7 +864,6 @@ class MapView {
     this.selectedPlaceholder = null;
     this.longPressTimer = null;
     this.longPressDuration = 2000;
-    this.memoryOverlayVisible = false;
 
     // User ID (uid 명시적 관리)
     this.currentUserId = null;
@@ -1672,9 +1715,9 @@ class MapView {
       this.sphereUniforms.uTime.value += 0.01;
     }
 
-    // Update memory overlay positions if visible
-    if (this.memoryOverlayVisible) {
-      this.updateMemoryOverlay();
+    // Update audio based on user position (realtime)
+    if (this.userMarker && this.userMarker.position) {
+      this.audioManager.update(this.userMarker.position);
     }
 
     this.renderer.render(this.scene, this.camera);
@@ -1821,13 +1864,9 @@ class MapView {
     // Add 3D marker to sphere (왜곡된 위치에)
     this.addPlaceMarker(placeData);
 
-    // Update PathFinder with new places
+    // Update PathFinder and AudioManager with new places
     this.pathFinder.setPlaces(this.placeholders);
-
-    // Load theme song for this place
-    if (placeData.themeSongURL) {
-      this.audioManager.loadThemeSong(placeData.id, placeData.themeSongURL);
-    }
+    this.audioManager.setPlaces(this.placeholders);
   }
 
   /**
@@ -2088,14 +2127,9 @@ class MapView {
         console.log(`  ✓ Loaded: ${placeData.name} at ${placeData.latitude.toFixed(4)}°N, ${placeData.longitude.toFixed(4)}°E`);
       });
 
-      // Update PathFinder with loaded places
+      // Update PathFinder and AudioManager with loaded places
       this.pathFinder.setPlaces(this.placeholders);
-
-      // Load all theme songs
-      this.audioManager.loadAllThemeSongs(this.placeholders.map(p => ({
-        placeId: p.id || p.docId,
-        themeSongURL: p.themeSongURL
-      })));
+      this.audioManager.setPlaces(this.placeholders);
 
       console.log(`📍 ✅ Successfully loaded ${this.placeholders.length} place(s) from Firebase`);
     } catch (error) {
@@ -2239,103 +2273,85 @@ class MapView {
     document.getElementById('speech-bubble').classList.add('hidden');
   }
 
-  // Toggle memory overlay - show all places with mandala/name/memory
-  toggleMemoryOverlay() {
-    this.memoryOverlayVisible = !this.memoryOverlayVisible;
-    const container = document.getElementById('memory-overlay-container');
+  /**
+   * Show memory collection modal with all places in gallery format
+   */
+  showMemoryCollection() {
+    const modal = document.getElementById('memory-collection-modal');
+    const grid = document.getElementById('collection-grid');
 
-    if (this.memoryOverlayVisible) {
-      console.log('📍 Showing memory overlay');
-      container.classList.remove('hidden');
-      this.updateMemoryOverlay();
+    // Clear grid
+    grid.innerHTML = '';
+
+    // Check if there are any places
+    if (this.placeholders.length === 0) {
+      grid.innerHTML = `
+        <div class="collection-empty">
+          <h3>아직 기록이 없습니다</h3>
+          <p>장소를 추가하여 지도를 채워보세요</p>
+        </div>
+      `;
     } else {
-      console.log('📍 Hiding memory overlay');
-      container.classList.add('hidden');
-      container.innerHTML = '';
+      // Create a card for each place
+      for (const place of this.placeholders) {
+        const card = document.createElement('div');
+        card.className = 'collection-card';
+
+        // Add mandala image if exists
+        if (place.mandalaImage) {
+          const mandalaImg = document.createElement('img');
+          mandalaImg.className = 'collection-card-mandala';
+          mandalaImg.src = place.mandalaImage;
+          mandalaImg.alt = place.name;
+          card.appendChild(mandalaImg);
+        } else {
+          // Default placeholder if no mandala
+          const mandalaPlaceholder = document.createElement('div');
+          mandalaPlaceholder.className = 'collection-card-mandala';
+          mandalaPlaceholder.style.backgroundColor = '#e0e0e0';
+          mandalaPlaceholder.style.display = 'flex';
+          mandalaPlaceholder.style.alignItems = 'center';
+          mandalaPlaceholder.style.justifyContent = 'center';
+          mandalaPlaceholder.style.color = '#9e9e9e';
+          mandalaPlaceholder.style.fontSize = '0.8rem';
+          mandalaPlaceholder.textContent = '만다라 없음';
+          card.appendChild(mandalaPlaceholder);
+        }
+
+        // Place name
+        const nameEl = document.createElement('h3');
+        nameEl.className = 'collection-card-name';
+        nameEl.textContent = place.name;
+        card.appendChild(nameEl);
+
+        // Intimacy score
+        const intimacyEl = document.createElement('p');
+        intimacyEl.className = 'collection-card-intimacy';
+        intimacyEl.textContent = `친밀도: ${place.intimacy}`;
+        card.appendChild(intimacyEl);
+
+        // Memory text
+        const memoryEl = document.createElement('p');
+        memoryEl.className = 'collection-card-memory';
+        memoryEl.textContent = place.memory || '(기록된 추억이 없습니다)';
+        card.appendChild(memoryEl);
+
+        // Optional: Add click handler to focus on this place
+        card.addEventListener('click', () => {
+          modal.classList.add('hidden');
+          // You could add logic here to focus the camera on this place
+          console.log(`📍 Clicked on place: ${place.name}`);
+        });
+
+        grid.appendChild(card);
+      }
     }
+
+    // Show modal
+    modal.classList.remove('hidden');
   }
 
-  // Update memory overlay positions (called during render loop if visible)
-  updateMemoryOverlay() {
-    const container = document.getElementById('memory-overlay-container');
-    container.innerHTML = '';
-
-    console.log(`📍 updateMemoryOverlay: visible=${this.memoryOverlayVisible}, places=${this.placeholders.length}`);
-
-    if (!this.memoryOverlayVisible || this.placeholders.length === 0) {
-      console.log(`   ❌ Skipping: visible=${this.memoryOverlayVisible}, places=${this.placeholders.length}`);
-      return;
-    }
-
-    let cardsCreated = 0;
-    let cardsSkipped = 0;
-
-    // For each place, calculate screen position and create card
-    for (let i = 0; i < this.placeholders.length; i++) {
-      const place = this.placeholders[i];
-
-      // Get 3D position from shader uniforms
-      const placeNormal = this.sphereUniforms.uPlacePositions.value[i];
-      if (!placeNormal) {
-        console.log(`   ⚠️ Place ${i} (${place.name}): no placeNormal`);
-        cardsSkipped++;
-        continue;
-      }
-
-      // Convert 3D position to screen coordinates
-      const screenPos = this.worldToScreen(placeNormal);
-
-      // Skip if behind camera or out of view
-      if (!screenPos) {
-        console.log(`   ⚠️ Place ${i} (${place.name}): behind camera`);
-        cardsSkipped++;
-        continue;
-      }
-
-      if (screenPos.x < 0 || screenPos.x > this.canvas.width ||
-          screenPos.y < 0 || screenPos.y > this.canvas.height) {
-        console.log(`   ⚠️ Place ${i} (${place.name}): out of view (${screenPos.x.toFixed(1)}, ${screenPos.y.toFixed(1)})`);
-        cardsSkipped++;
-        continue;
-      }
-
-      // Create memory card
-      const card = document.createElement('div');
-      card.className = 'place-memory-card';
-      card.style.left = `${screenPos.x}px`;
-      card.style.top = `${screenPos.y}px`;
-
-      console.log(`   ✅ Place ${i} (${place.name}): card at (${screenPos.x.toFixed(1)}, ${screenPos.y.toFixed(1)})`);
-      cardsCreated++;
-
-      // Mandala image
-      if (place.mandalaImage) {
-        const mandalaImg = document.createElement('img');
-        mandalaImg.className = 'place-card-mandala';
-        mandalaImg.src = place.mandalaImage;
-        mandalaImg.alt = place.name;
-        card.appendChild(mandalaImg);
-      }
-
-      // Place name
-      const nameEl = document.createElement('h4');
-      nameEl.className = 'place-card-name';
-      nameEl.textContent = place.name;
-      card.appendChild(nameEl);
-
-      // Memory text
-      const memoryEl = document.createElement('p');
-      memoryEl.className = 'place-card-memory';
-      memoryEl.textContent = place.memory || '(기억 없음)';
-      card.appendChild(memoryEl);
-
-      container.appendChild(card);
-    }
-
-    console.log(`📍 Memory overlay update complete: ${cardsCreated} cards created, ${cardsSkipped} skipped`);
-  }
-
-  // Convert 3D world position to 2D screen coordinates
+  // Convert 3D world position to 2D screen coordinates (still used by navigation)
   worldToScreen(worldPos) {
     const vector = new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z);
     vector.project(this.camera);
@@ -2608,10 +2624,14 @@ class MapView {
       this.showNavigationModal();
     });
 
-    // Memory overlay toggle
-    document.getElementById('memory-overlay-btn').addEventListener('click', () => {
-      console.log('📍 Memory overlay button clicked');
-      this.toggleMemoryOverlay();
+    // Memory collection modal
+    document.getElementById('memory-collection-btn').addEventListener('click', () => {
+      this.showMemoryCollection();
+    });
+
+    // Close collection modal
+    document.getElementById('close-collection-modal').addEventListener('click', () => {
+      document.getElementById('memory-collection-modal').classList.add('hidden');
     });
 
     // Add place - show modal with search + data input
@@ -3042,29 +3062,8 @@ class MapView {
    * Start audio updates based on user location
    */
   startAudioUpdates() {
-    // Update audio every 100ms based on current location
-    if (this.audioUpdateInterval) {
-      clearInterval(this.audioUpdateInterval);
-    }
-
-    this.audioUpdateInterval = setInterval(() => {
-      const userLocation = {
-        lat: this.userGPS.latitude,
-        lng: this.userGPS.longitude
-      };
-
-      const places = this.placeholders.map(p => ({
-        placeId: p.id,
-        latitude: p.latitude,
-        longitude: p.longitude,
-        emotionKeywords: p.emotionKeywords || [],
-        intimacyScore: p.intimacy || 50
-      }));
-
-      this.audioManager.updateAudioForLocation(userLocation, places);
-    }, 100);
-
-    console.log('🎵 Audio updates started');
+    // Audio will be updated in animate() loop via audioManager.update(userNormal)
+    console.log('🎵 Audio updates enabled (realtime via animate loop)');
   }
 
   /**
@@ -3075,7 +3074,7 @@ class MapView {
       clearInterval(this.audioUpdateInterval);
       this.audioUpdateInterval = null;
     }
-    this.audioManager.cleanup();
+    this.audioManager.stopAll();
     console.log('🎵 Audio updates stopped');
   }
 
