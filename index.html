@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Emotional Map</title>
+  <script type="module" crossorigin src="/emotionMap/assets/index-D0OYY9vE.js"></script>
+  <link rel="stylesheet" crossorigin href="/emotionMap/assets/index-DrO1HYQT.css">
+</head>
+
+<body>
+    <!-- 1. Authentication Screen (Simple Horizontal Layout) -->
+    <div id="auth-screen" class="screen active">
+        <div class="auth-container">
+            <h1 class="auth-title">Emotional Map</h1>
+
+            <div class="auth-card">
+                <div class="auth-row">
+                    <input type="text" id="auth-nickname" placeholder="Nickname" maxlength="20" class="auth-input" />
+                    <input type="tel" id="auth-code" placeholder="6-digit code" maxlength="6" pattern="\d{6}" class="auth-input" />
+                </div>
+
+                <div class="auth-row">
+                    <button id="signin-btn" class="auth-btn">Sign In</button>
+                    <button id="signup-btn" class="auth-btn auth-btn-primary">Create Account</button>
+                </div>
+
+                <div id="auth-error" class="error-message"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. Mandala Creation Screen (8-Quadrant Canvas) -->
+    <div id="mandala-screen" class="screen">
+        <div class="mandala-container">
+            <h2 class="mandala-title">Create Your Mandala</h2>
+
+            <div class="mandala-workspace">
+                <!-- 8-Quadrant Canvas -->
+                <div class="canvas-container">
+                    <canvas id="mandala-canvas" width="400" height="400"></canvas>
+                </div>
+
+                <!-- Color Palette & Controls -->
+                <div class="mandala-controls">
+                    <div class="color-palette" id="color-palette"></div>
+
+                    <label class="symmetry-toggle">
+                        <input type="checkbox" id="symmetry-checkbox" />
+                        <span>마주보게 설정 (Set Symmetrical)</span>
+                    </label>
+
+                    <button id="complete-mandala-btn" class="btn-complete">그리기 (Draw)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Main Map View Shell -->
+    <div id="map-screen" class="screen">
+        <!-- Top Navigation Bar -->
+        <div class="map-nav-bar">
+            <button id="nav-btn" class="nav-btn">Navigation</button>
+            <button id="signout-btn" class="nav-btn">Sign out</button>
+        </div>
+
+        <!-- Map Canvas (Large Central Area) -->
+        <div id="map-canvas-container">
+            <canvas id="map-canvas"></canvas>
+
+            <!-- Zoom Controls (Bottom Right) -->
+            <div class="zoom-controls">
+                <button id="zoom-in-btn" class="zoom-btn">+</button>
+                <button id="zoom-out-btn" class="zoom-btn">−</button>
+            </div>
+
+            <!-- Speech Bubble (Hidden by default) -->
+            <div id="speech-bubble" class="speech-bubble hidden">
+                <button class="bubble-close" id="bubble-close-btn">×</button>
+                <h3 id="bubble-place-name"></h3>
+                <p id="bubble-memory-text"></p>
+            </div>
+        </div>
+
+        <!-- Bottom Action Button -->
+        <div class="map-bottom-bar">
+            <button id="add-place-btn" class="btn-add-place">Add place</button>
+        </div>
+
+        <!-- Combined Add Place Modal (Search + Data Input) -->
+        <div id="add-place-modal" class="modal hidden">
+            <div class="modal-content add-place-content-large">
+                <h2 class="modal-title">장소 추가 (Add Place)</h2>
+
+                <!-- Search Section -->
+                <div class="form-section">
+                    <h3 class="section-title">1. 장소 검색 (Search Place)</h3>
+                    <div class="form-field">
+                        <input type="text" id="search-place-input" class="form-input" placeholder="장소 이름 입력 (Enter place name)..." />
+                    </div>
+
+                    <div id="search-results" class="search-results">
+                        <div id="search-results-list"></div>
+                    </div>
+                </div>
+
+                <!-- Data Input Section (shown after selection) -->
+                <div id="data-input-section" class="form-section hidden">
+                    <h3 class="section-title">2. 장소 정보 (Place Details)</h3>
+
+                    <div class="form-field">
+                        <label for="place-name">선택한 장소 (Selected Place)</label>
+                        <input type="text" id="place-name" class="form-input" readonly />
+                    </div>
+
+                    <div class="form-field">
+                        <label for="intimacy-score">친밀도 (Intimacy): <span id="intimacy-value">50</span></label>
+                        <input type="range" id="intimacy-score" class="form-slider" min="0" max="100" value="50" />
+                    </div>
+
+                    <div class="form-field">
+                        <label>감정 키워드 (Emotions - 최대 3개)</label>
+                        <div class="emotion-grid" id="emotion-grid">
+                            <button class="emotion-btn" data-emotion="calm">차분함</button>
+                            <button class="emotion-btn" data-emotion="affection">애정</button>
+                            <button class="emotion-btn" data-emotion="anxiety">불안</button>
+                            <button class="emotion-btn" data-emotion="avoidance">회피</button>
+                            <button class="emotion-btn" data-emotion="emptiness">공허</button>
+                            <button class="emotion-btn" data-emotion="impulse">충동</button>
+                            <button class="emotion-btn" data-emotion="tension">긴장</button>
+                        </div>
+                    </div>
+
+                    <div class="form-field">
+                        <label for="memory-text">기억 (Memory)</label>
+                        <textarea id="memory-text" class="form-textarea" placeholder="이 장소에 대한 기억을 적어주세요..." rows="3" maxlength="300"></textarea>
+                    </div>
+                </div>
+
+                <div class="modal-buttons">
+                    <button id="add-place-cancel-btn" class="modal-btn">취소</button>
+                    <button id="add-place-next-btn" class="modal-btn modal-btn-primary hidden">다음 (그리기)</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete Confirmation Modal -->
+        <div id="delete-modal" class="modal hidden">
+            <div class="modal-content">
+                <p>삭제할까요? (Delete this place?)</p>
+                <div class="modal-buttons">
+                    <button id="delete-no-btn" class="modal-btn">아니 (No)</button>
+                    <button id="delete-yes-btn" class="modal-btn modal-btn-danger">응 (Yes)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="spinner"></div>
+    </div>
+
+</body>
+
+</html>
