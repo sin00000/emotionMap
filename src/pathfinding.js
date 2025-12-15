@@ -172,7 +172,7 @@ export class PathFinder {
       return {
         valid: false,
         path: [],
-        warning: '무음 지대에 의해 경로가 끊깁니다.',
+        warning: '친밀도가 기준치 이하입니다. 행복을 궁극적 목적으로 취급해야 합니다.',
         failureReason: 'mute_zone'
       };
     }
@@ -250,7 +250,7 @@ export class PathFinder {
     // Determine specific failure message
     let warning;
     if (fallbackResult.failureReason === 'mute_zone') {
-      warning = '무음 지대에 의해 경로가 끊깁니다.';
+      warning = '친밀도가 기준치 이하입니다. 행복을 궁극적 목적으로 취급해야 합니다.';
     } else if (fallbackResult.failureReason === 'slope_exceeded') {
       warning = '경사가 허용치를 초과해 이동할 수 없습니다.';
     } else {

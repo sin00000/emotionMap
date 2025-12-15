@@ -104,32 +104,10 @@ function isForbiddenZone(place) {
 }
 
 /**
- * 친밀도 기반 경로 가중치 계산
- * @param {Object} place - 장소 데이터
- * @returns {number} - 경로 가중치 (낮을수록 선호)
- */
-function getPathWeight(place) {
-  const zoneType = getZoneType(place);
-
-  switch(zoneType) {
-    case 'forbidden':
-      return Infinity; // 절대 통과 불가
-    case 'uncomfortable':
-      return 10.0; // 매우 높은 가중치 (회피)
-    case 'comfortable':
-      return 0.5; // 낮은 가중치 (선호)
-    case 'welcoming':
-      return 0.1; // 매우 낮은 가중치 (최우선 선호)
-    default:
-      return 1.0;
-  }
-}
-
-/**
- * 목적지가 도달 가능한지 확인
- * @param {Object} destination - 목적지 장소
- * @param {Array} places - 모든 장소 목록
- * @returns {Object} - { reachable: boolean, reason: string, alternative: Object }
+ * Check if destination is reachable (not a forbidden zone)
+ * @param {Object} destination - Destination place
+ * @param {Array} places - All places
+ * @returns {Object} - {reachable: boolean, reason: string, alternative: Object}
  */
 function checkDestinationReachability(destination, places) {
   // 목적지 자체가 금지구역인 경우
@@ -156,6 +134,29 @@ function checkDestinationReachability(destination, places) {
     alternative: null
   };
 }
+
+/**
+ * 친밀도 기반 경로 가중치 계산
+ * @param {Object} place - 장소 데이터
+ * @returns {number} - 경로 가중치 (낮을수록 선호)
+ */
+function getPathWeight(place) {
+  const zoneType = getZoneType(place);
+
+  switch (zoneType) {
+    case 'forbidden':
+      return Infinity; // 절대 통과 불가
+    case 'uncomfortable':
+      return 10.0; // 매우 높은 가중치 (회피)
+    case 'comfortable':
+      return 0.5; // 낮은 가중치 (선호)
+    case 'welcoming':
+      return 0.1; // 매우 낮은 가중치 (최우선 선호)
+    default:
+      return 1.0;
+  }
+}
+
 
 async function hashCode(code) {
   const encoder = new TextEncoder();
@@ -879,6 +880,12 @@ class MapView {
     this.audioManager = new AudioManager();
     this.currentRouteLine = null; // 3D route visualization
 
+    // Navigation state
+    this.currentPath = null;
+    this.currentDestination = null;
+    this.navigationProgress = 0;
+    this.navMessageTimeout = null;
+
     // GPS tracking
     this.gpsWatchId = null;
     this.isGPSActive = false;
@@ -1122,7 +1129,7 @@ class MapView {
         let errorMessage = 'GPS 위치를 가져올 수 없습니다.';
         let shouldShowMessage = false;
 
-        switch(error.code) {
+        switch (error.code) {
           case error.PERMISSION_DENIED:
             console.error('❌ GPS Error: Permission denied');
             errorMessage = 'GPS 권한이 거부되었습니다. 브라우저 설정에서 위치 권한을 허용해주세요.';
@@ -2573,6 +2580,14 @@ class MapView {
         console.log(`   ❌ No place found at this position`);
       }
 
+      // Hide navigation message during touch/click
+      if (this.currentPath) {
+        const messageEl = document.getElementById('nav-progress-message');
+        if (messageEl) {
+          messageEl.classList.add('hidden');
+        }
+      }
+
       // Store start position for drag detection
       dragStartPixel = { x: e.clientX, y: e.clientY };
       dragStartGPS = { ...this.userGPS };
@@ -2678,6 +2693,14 @@ class MapView {
         console.log(`   ❌ No touchedPlace`);
       }
 
+      // Show navigation message again after touch/click ends
+      if (this.currentPath && this.currentDestination) {
+        const messageEl = document.getElementById('nav-progress-message');
+        if (messageEl && messageEl.classList.contains('hidden')) {
+          messageEl.classList.remove('hidden');
+        }
+      }
+
       touchedPlace = null;
       dragStartPixel = null;
       dragStartGPS = null;
@@ -2776,9 +2799,6 @@ class MapView {
     const modal = document.getElementById('navigation-modal');
     const select = document.getElementById('destination-select');
 
-    console.log('[DEBUG] Navigation 모달 열림');
-    console.log('[DEBUG] placeholders 개수:', this.placeholders.length);
-
     // Clear and populate destination options
     select.innerHTML = '<option value="">목적지를 선택하세요...</option>';
 
@@ -2792,10 +2812,8 @@ class MapView {
     if (this.placeholders.length === 0) {
       select.innerHTML = '<option value="">장소를 먼저 추가하세요...</option>';
       select.disabled = true;
-      console.log('[DEBUG] 장소가 없어서 선택 비활성화');
     } else {
       select.disabled = false;
-      console.log('[DEBUG] 선택 활성화, 옵션 개수:', select.options.length);
     }
 
     // Reset UI
@@ -2831,7 +2849,6 @@ class MapView {
     // Destination selection
     select.addEventListener('change', () => {
       const index = parseInt(select.value);
-      console.log('[DEBUG] 목적지 선택됨, index:', index);
       if (isNaN(index)) {
         document.getElementById('zone-info').classList.add('hidden');
         document.getElementById('reachability-warning').classList.add('hidden');
@@ -2842,25 +2859,21 @@ class MapView {
 
       const destination = this.placeholders[index];
       this.selectedDestination = destination;
-      console.log('[DEBUG] selectedDestination 설정됨:', destination);
 
       // Show zone info
       this.showZoneInfo(destination);
 
       // Check reachability
       const reachability = checkDestinationReachability(destination, this.placeholders);
-      console.log('[DEBUG] reachability:', reachability);
       this.showReachabilityInfo(reachability);
 
       // Show route preview if reachable
       if (reachability.reachable) {
         this.showRoutePreview(destination);
         startBtn.disabled = false;
-        console.log('[DEBUG] 버튼 활성화됨');
       } else {
         document.getElementById('route-preview').classList.add('hidden');
         startBtn.disabled = true;
-        console.log('[DEBUG] 버튼 비활성화됨 (도달 불가능)');
       }
     });
 
@@ -2875,13 +2888,9 @@ class MapView {
 
     // Start navigation
     startBtn.addEventListener('click', () => {
-      console.log('[DEBUG] 길 안내 시작 버튼 클릭됨');
-      console.log('[DEBUG] selectedDestination:', this.selectedDestination);
       if (this.selectedDestination) {
         this.startNavigation(this.selectedDestination);
         closeModal();
-      } else {
-        console.error('[DEBUG] selectedDestination이 없습니다!');
       }
     });
   }
@@ -2903,20 +2912,20 @@ class MapView {
     // Set badge text and description
     const zoneTexts = {
       forbidden: {
-        badge: '🚫 금지구역',
-        description: '친밀도가 매우 낮아 통과할 수 없습니다. 이 장소로는 갈 수 없습니다.'
+        badge: '금지구역',
+        description: '인간의 궁극적 목적은 언제나 행복입니다. 이곳에는 길이 없습니다.'
       },
       uncomfortable: {
-        badge: '⚠️ 불편한 길',
-        description: '친밀도가 낮아 경로에 높은 가중치가 적용됩니다. 가능하면 회피하는 길을 안내합니다.'
+        badge: '불편한 길',
+        description: '인생의 굴곡은 불편하게 느껴집니다. 회피하는 길을 안내합니다.'
       },
       comfortable: {
-        badge: '✓ 편안한 길',
+        badge: '편안한 길',
         description: '적당한 친밀도로 경로에 낮은 가중치가 적용됩니다. 선호되는 길입니다.'
       },
       welcoming: {
-        badge: '💚 환영하는 길',
-        description: '친밀도가 매우 높아 새로운 경로가 생성됩니다. 최우선으로 안내되는 길입니다.'
+        badge: '행복한 길',
+        description: '미래 세계를 위한 새로운 경로가 개척합니다. 당신은 나아가야 합니다.'
       }
     };
 
@@ -2971,10 +2980,10 @@ class MapView {
 
     // Update stats
     document.getElementById('actual-distance').textContent =
-      actualDist < 1000 ? `${actualDist.toFixed(0)}m` : `${(actualDist/1000).toFixed(1)}km`;
+      actualDist < 1000 ? `${actualDist.toFixed(0)}m` : `${(actualDist / 1000).toFixed(1)}km`;
 
     document.getElementById('emotional-distance').textContent =
-      emotionalDist < 1000 ? `${emotionalDist.toFixed(0)}m` : `${(emotionalDist/1000).toFixed(1)}km`;
+      emotionalDist < 1000 ? `${emotionalDist.toFixed(0)}m` : `${(emotionalDist / 1000).toFixed(1)}km`;
 
     // Count waypoints (simplified - just show comfortable/welcoming places)
     const waypoints = this.placeholders.filter(p =>
@@ -2985,6 +2994,7 @@ class MapView {
 
     preview.classList.remove('hidden');
   }
+
 
   /**
    * Validate destination before navigation
@@ -3003,7 +3013,7 @@ class MapView {
 
     // Condition 2: Missing latitude or longitude
     if (dest.latitude === undefined || dest.longitude === undefined ||
-        dest.latitude === null || dest.longitude === null) {
+      dest.latitude === null || dest.longitude === null) {
       console.error('[NAV] ❌ FAIL: missing lat/lng');
       return { ok: false, reason: '목적지 좌표가 없습니다.', destNormal: null };
     }
@@ -3048,7 +3058,7 @@ class MapView {
     // Validate destination
     const validation = this.validateDestination(destination);
     if (!validation.ok) {
-      alert(`⚠️ ${validation.reason}`);
+      alert(validation.reason);
       return;
     }
 
@@ -3151,6 +3161,10 @@ class MapView {
     // Start audio updates
     this.startAudioUpdates();
 
+    // Force audio refresh for navigation start
+    this.audioManager.activePlaceId = null;
+    this.audioManager.update(userNormal);
+
     // Show fallback warning if using relaxed slope limit
     if (pathResult.isFallback && pathResult.warning) {
       this.showNavigationMessage(pathResult.warning);
@@ -3228,35 +3242,51 @@ class MapView {
     // Debug logging to verify percentage increases as user moves toward destination
     console.log(`[NAV PROGRESS] closestIndex: ${closestIndex}/${this.currentPath.length - 1} (${progressPercent}%), distance: ${distanceText}`);
 
-    this.showNavigationMessage(`"${this.currentDestination.name}"까지 ${distanceText} (경로 ${progressPercent}%)`);
+    // Show permanent progress message
+    this.showNavigationMessage(`"${this.currentDestination.name}"까지 ${distanceText} (경로 ${progressPercent}%)`, false);
 
-    // Trigger narrative messages at certain progress points
+    // Trigger narrative messages at certain progress points (temporary)
     if (prevProgress < this.currentPath.length * 0.25 && closestIndex >= this.currentPath.length * 0.25) {
-      this.showNavigationMessage("여기서부터는 내려갈 수 있지만, 돌아갈 수는 없다.");
+      this.showNavigationMessage("여기서부터는 내려갈 수 있지만, 돌아갈 수는 없다.", true);
     } else if (prevProgress < this.currentPath.length * 0.5 && closestIndex >= this.currentPath.length * 0.5) {
-      this.showNavigationMessage("지금 당신은 걷고 있지만, 접근하고 있진 않다.");
+      this.showNavigationMessage("지금 당신은 걷고 있지만, 접근하고 있진 않다.", true);
     } else if (prevProgress < this.currentPath.length * 0.75 && closestIndex >= this.currentPath.length * 0.75) {
-      this.showNavigationMessage("경로가 이어지는 것은 허락이 아니라 습관이다.");
+      this.showNavigationMessage("경로가 이어지는 것은 허락이 아니라 습관이다.", true);
     }
 
     // Check if reached destination (within 50 meters)
     if (distanceMeters < 50) {
-      this.showNavigationMessage(`"${this.currentDestination.name}"에 도착했습니다.`);
+      this.showNavigationMessage(`"${this.currentDestination.name}"에 도착했습니다.`, true);
       this.stopNavigation();
     }
   }
 
   /**
    * Show narrative navigation message
+   * @param {string} message - Message to display
+   * @param {boolean} temporary - If true, hide after 4 seconds (default: false)
    */
-  showNavigationMessage(message) {
+  showNavigationMessage(message, temporary = false) {
     const messageEl = document.getElementById('nav-progress-message');
     messageEl.textContent = message;
     messageEl.classList.remove('hidden');
 
-    setTimeout(() => {
-      messageEl.classList.add('hidden');
-    }, 4000);
+    // Clear any existing timeout
+    if (this.navMessageTimeout) {
+      clearTimeout(this.navMessageTimeout);
+      this.navMessageTimeout = null;
+    }
+
+    // Add/remove temporary class for animation
+    if (temporary) {
+      messageEl.classList.add('temporary');
+      this.navMessageTimeout = setTimeout(() => {
+        messageEl.classList.add('hidden');
+        messageEl.classList.remove('temporary');
+      }, 4000);
+    } else {
+      messageEl.classList.remove('temporary');
+    }
   }
 
   /**
@@ -3349,6 +3379,18 @@ class MapView {
     this.currentDestination = null;
     this.currentPath = null;
     this.navigationProgress = 0;
+
+    // Hide navigation message
+    const messageEl = document.getElementById('nav-progress-message');
+    if (messageEl) {
+      messageEl.classList.add('hidden');
+    }
+
+    // Clear message timeout if exists
+    if (this.navMessageTimeout) {
+      clearTimeout(this.navMessageTimeout);
+      this.navMessageTimeout = null;
+    }
 
     // Hide stop button
     this.hideNavigationStopButton();
