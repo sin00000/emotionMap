@@ -5,8 +5,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Emotional Map</title>
-  <script type="module" crossorigin src="/emotionMap/assets/index-eDXS2hZO.js"></script>
-  <link rel="stylesheet" crossorigin href="/emotionMap/assets/index-DrO1HYQT.css">
+  <script type="module" crossorigin src="/emotionMap/assets/index-lNpJA_Ok.js"></script>
+  <link rel="stylesheet" crossorigin href="/emotionMap/assets/index-gP214r3X.css">
 </head>
 
 <body>
@@ -152,6 +152,61 @@
                 <div class="modal-buttons">
                     <button id="delete-no-btn" class="modal-btn">아니 (No)</button>
                     <button id="delete-yes-btn" class="modal-btn modal-btn-danger">응 (Yes)</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Navigation Modal -->
+        <div id="navigation-modal" class="modal hidden">
+            <div class="modal-content navigation-modal-content">
+                <h2 class="modal-title">길 안내 (Navigation)</h2>
+                <button class="modal-close" id="navigation-close-btn">×</button>
+
+                <div class="navigation-content">
+                    <!-- Destination Selection -->
+                    <div class="nav-section">
+                        <label class="nav-label">목적지 선택 (Select Destination)</label>
+                        <select id="destination-select" class="nav-select">
+                            <option value="">목적지를 선택하세요...</option>
+                        </select>
+                    </div>
+
+                    <!-- Zone Info -->
+                    <div id="zone-info" class="nav-section zone-info hidden">
+                        <div class="zone-badge"></div>
+                        <p class="zone-description"></p>
+                    </div>
+
+                    <!-- Reachability Warning -->
+                    <div id="reachability-warning" class="nav-section nav-warning hidden">
+                        <div class="warning-icon">⚠️</div>
+                        <p class="warning-message"></p>
+                        <button id="alternative-destination-btn" class="btn-alternative hidden">대안 목적지로 이동</button>
+                    </div>
+
+                    <!-- Route Preview -->
+                    <div id="route-preview" class="nav-section hidden">
+                        <h3>경로 미리보기</h3>
+                        <div class="route-stats">
+                            <div class="stat-item">
+                                <span class="stat-label">실제 거리</span>
+                                <span class="stat-value" id="actual-distance">-</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">감정적 거리</span>
+                                <span class="stat-value" id="emotional-distance">-</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">통과 지점</span>
+                                <span class="stat-value" id="waypoint-count">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-buttons">
+                    <button id="navigation-cancel-btn" class="modal-btn">취소</button>
+                    <button id="navigation-start-btn" class="modal-btn modal-btn-primary" disabled>길 안내 시작</button>
                 </div>
             </div>
         </div>
