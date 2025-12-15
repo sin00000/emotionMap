@@ -4,21 +4,22 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Emotional Map</title>
-  <script type="module" crossorigin src="/emotionMap/assets/index-LVykS_G7.js"></script>
-  <link rel="stylesheet" crossorigin href="/emotionMap/assets/index-B9HvWSA7.css">
+    <title>Emotion Map</title>
+  <script type="module" crossorigin src="/emotionMap/assets/index-UgNvZFs4.js"></script>
+  <link rel="stylesheet" crossorigin href="/emotionMap/assets/index-CjyB8syn.css">
 </head>
 
 <body>
     <!-- 1. Authentication Screen (Simple Horizontal Layout) -->
     <div id="auth-screen" class="screen active">
         <div class="auth-container">
-            <h1 class="auth-title">Emotional Map</h1>
+            <h1 class="auth-title">Emotion Map</h1>
 
             <div class="auth-card">
                 <div class="auth-row">
                     <input type="text" id="auth-nickname" placeholder="Nickname" maxlength="20" class="auth-input" />
-                    <input type="tel" id="auth-code" placeholder="6-digit code" maxlength="6" pattern="\d{6}" class="auth-input" />
+                    <input type="tel" id="auth-code" placeholder="6-digit code" maxlength="6" pattern="\d{6}"
+                        class="auth-input" />
                 </div>
 
                 <div class="auth-row">
@@ -62,8 +63,7 @@
         <!-- Top Navigation Bar -->
         <div class="map-nav-bar">
             <button id="nav-btn" class="nav-btn">Navigation</button>
-            <button id="memory-overlay-btn" class="nav-btn">지도 기록</button>
-            <span id="user-nickname" class="user-nickname"></span>
+            <button id="memory-collection-btn" class="nav-btn memory-btn">Memory</button>
             <button id="signout-btn" class="nav-btn">Sign out</button>
         </div>
 
@@ -87,9 +87,33 @@
                 </div>
             </div>
 
-            <!-- Memory Overlay Container (Hidden by default) -->
-            <div id="memory-overlay-container" class="hidden"></div>
         </div>
+
+        <!-- Memory Collection Modal (Hidden by default) -->
+        <div id="memory-collection-modal" class="modal hidden">
+            <div class="modal-content collection-modal-content">
+                <div class="modal-header">
+                    <h2>Memory</h2>
+                    <button class="modal-close" id="close-collection-modal">×</button>
+                </div>
+                <div id="collection-grid" class="collection-grid"></div>
+            </div>
+        </div>
+
+        <!-- Destination Replacement Modal -->
+        <div id="destination-replacement-modal" class="modal hidden">
+            <div class="modal-content">
+                <p class="narrative-text">"난 행복하게 살고싶어"</p>
+                <p>장소를 변경하시겠습니까?</p>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-yes" id="replace-dest-yes1">예</button>
+                    <button class="modal-btn modal-btn-yes" id="replace-dest-yes2">예</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Navigation Progress Message -->
+        <div id="nav-progress-message" class="nav-message hidden"></div>
 
         <!-- Bottom Action Button -->
         <div class="map-bottom-bar">
@@ -105,7 +129,8 @@
                 <div class="form-section">
                     <h3 class="section-title">1. 장소 검색 (Search Place)</h3>
                     <div class="form-field">
-                        <input type="text" id="search-place-input" class="form-input" placeholder="장소 이름 입력 (Enter place name)..." />
+                        <input type="text" id="search-place-input" class="form-input"
+                            placeholder="장소 이름 입력 (Enter place name)..." />
                     </div>
 
                     <div id="search-results" class="search-results">
@@ -142,7 +167,8 @@
 
                     <div class="form-field">
                         <label for="memory-text">기억 (Memory)</label>
-                        <textarea id="memory-text" class="form-textarea" placeholder="이 장소에 대한 기억을 적어주세요..." rows="3" maxlength="300"></textarea>
+                        <textarea id="memory-text" class="form-textarea" placeholder="이 장소에 대한 기억을 적어주세요..." rows="3"
+                            maxlength="300"></textarea>
                     </div>
                 </div>
 
