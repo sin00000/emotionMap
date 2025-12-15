@@ -7398,7 +7398,11 @@ ${this.customData.serverResponse}`:this.message=this._baseMessage}}var Si;(funct
 
             if(mask > 0.01) {
               float intimacy = uPlaceIntimacy[i];
-              float weight = mask * intimacy;
+
+              // 색상 강도: 크기는 작아도 색은 선명하게 (최소 0.7 보장)
+              float intensityMin = 0.7;
+              float intensity = intensityMin + (1.0 - intensityMin) * intimacy;
+              float weight = mask * intensity;
 
               // 감정 색상 혼합
               finalColor += uPlaceColors[i] * weight;
