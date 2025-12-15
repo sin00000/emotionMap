@@ -957,7 +957,11 @@ class MapView {
 
             if(mask > 0.01) {
               float intimacy = uPlaceIntimacy[i];
-              float weight = mask * intimacy;
+
+              // 색상 강도: 크기는 작아도 색은 선명하게 (최소 0.7 보장)
+              float intensityMin = 0.7;
+              float intensity = intensityMin + (1.0 - intensityMin) * intimacy;
+              float weight = mask * intensity;
 
               // 감정 색상 혼합
               finalColor += uPlaceColors[i] * weight;
@@ -994,10 +998,6 @@ class MapView {
     // 사용자 위치 마커 (검은색 점)
     this.userMarker = null;
     this.createUserMarker();
-
-    // 경위선 그리드 (초기에는 왜곡 없이 생성)
-    this.gridGroup = null;
-    this.createDistortedGrid();
 
     // OrbitControls
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -1412,9 +1412,6 @@ class MapView {
     this.placeholders.forEach(place => {
       this.addPlaceMarker(place);
     });
-
-    // 그리드도 재생성 (왜곡이 사용자 중심이므로)
-    this.createDistortedGrid();
   }
 
   /**
@@ -1548,92 +1545,6 @@ class MapView {
     return warpedPos.normalize();
   }
 
-  /**
-   * 친밀도 기반 시공간 왜곡 그리드 생성
-   * D_emotional = D_actual × (1 - intimacy_scale)
-   */
-  createDistortedGrid() {
-    // 기존 그리드 제거
-    if (this.gridGroup) {
-      this.scene.remove(this.gridGroup);
-      this.gridGroup.traverse(child => {
-        if (child.geometry) child.geometry.dispose();
-        if (child.material) child.material.dispose();
-      });
-      this.gridGroup = null;
-    }
-
-    this.gridGroup = new THREE.Group();
-
-    // 그리드 라인 설정
-    const gridLines = 24; // 경도선 수
-    const latLines = 12;  // 위도선 수
-    const gridColor = new THREE.Color(0x64FFDA);
-    const gridOpacity = 0.15;
-
-    // === 경도선 (Meridians) ===
-    for (let i = 0; i < gridLines; i++) {
-      const longitude = (i / gridLines) * Math.PI * 2;
-      const points = [];
-
-      for (let j = 0; j <= 180; j++) {
-        const latitude = (j / 180) * Math.PI - Math.PI / 2;
-
-        // 기본 구체 좌표
-        let position = new THREE.Vector3(
-          Math.cos(latitude) * Math.cos(longitude),
-          Math.sin(latitude),
-          Math.cos(latitude) * Math.sin(longitude)
-        );
-
-        // 친밀도 기반 왜곡 적용
-        position = this.applyEmotionalDistortion(position, latitude, longitude);
-        points.push(position);
-      }
-
-      const geometry = new THREE.BufferGeometry().setFromPoints(points);
-      const material = new THREE.LineBasicMaterial({
-        color: gridColor,
-        opacity: gridOpacity,
-        transparent: true
-      });
-      const line = new THREE.Line(geometry, material);
-      this.gridGroup.add(line);
-    }
-
-    // === 위도선 (Parallels) ===
-    for (let i = 1; i < latLines; i++) {
-      const latitude = (i / latLines) * Math.PI - Math.PI / 2;
-      const points = [];
-
-      for (let j = 0; j <= 360; j++) {
-        const longitude = (j / 360) * Math.PI * 2;
-
-        // 기본 구체 좌표
-        let position = new THREE.Vector3(
-          Math.cos(latitude) * Math.cos(longitude),
-          Math.sin(latitude),
-          Math.cos(latitude) * Math.sin(longitude)
-        );
-
-        // 친밀도 기반 왜곡 적용
-        position = this.applyEmotionalDistortion(position, latitude, longitude);
-        points.push(position);
-      }
-
-      const geometry = new THREE.BufferGeometry().setFromPoints(points);
-      const material = new THREE.LineBasicMaterial({
-        color: gridColor,
-        opacity: gridOpacity,
-        transparent: true
-      });
-      const line = new THREE.Line(geometry, material);
-      this.gridGroup.add(line);
-    }
-
-    this.scene.add(this.gridGroup);
-    console.log('🌐 Grid created with emotional distortion');
-  }
 
   /**
    * 친밀도 기반 시공간 왜곡 적용
@@ -1894,9 +1805,6 @@ class MapView {
     if (placeData.themeSongURL) {
       this.audioManager.loadThemeSong(placeData.id, placeData.themeSongURL);
     }
-
-    // 그리드 다시 그리기 (새 장소의 영향 반영)
-    this.createDistortedGrid();
   }
 
   /**
@@ -2296,9 +2204,6 @@ class MapView {
 
     // Update PathFinder
     this.pathFinder.setPlaces(this.placeholders);
-
-    // Regenerate grid
-    this.createDistortedGrid();
   }
 
   editPlaceMandala(place) {
