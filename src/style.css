@@ -1288,6 +1288,44 @@ body {
 }
 
 /* ===================================================
+   AUDIO START OVERLAY (for browser autoplay policy)
+   =================================================== */
+
+.audio-start-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+
+.audio-start-btn {
+    padding: 1.5rem 3rem;
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #000000;
+    background: #1DE9B6;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.audio-start-btn:hover {
+    background: #00C896;
+    transform: scale(1.05);
+}
+
+.audio-start-btn:active {
+    transform: scale(0.95);
+}
+
+/* ===================================================
    UTILITY CLASSES
    =================================================== */
 

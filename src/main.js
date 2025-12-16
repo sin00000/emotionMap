@@ -553,6 +553,14 @@ function setupAuthListeners() {
 
       showScreen('map');
 
+      // ⭐ Show audio start overlay (for browser autoplay policy)
+      const audioOverlay = document.getElementById('audio-start-overlay');
+      const audioStartBtn = document.getElementById('audio-start-btn');
+
+      if (audioOverlay) {
+        audioOverlay.classList.remove('hidden');
+      }
+
       if (mapView) {
         mapView.reset();                // 전체 상태 초기화
         mapView.setUser(user.uid);      // uid 명시적 설정
@@ -560,6 +568,31 @@ function setupAuthListeners() {
         mapView.rebuildSurface();       // 표면 필드 재생성
       } else {
         await initMapView(user.uid);    // ✅ uid 전달
+      }
+
+      // ⭐ Audio start button click handler
+      if (audioStartBtn) {
+        audioStartBtn.onclick = () => {
+          console.log('🎵 User interaction: Starting audio system');
+
+          // Hide overlay
+          if (audioOverlay) {
+            audioOverlay.classList.add('hidden');
+          }
+
+          // ⭐ Initialize audio based on user position
+          if (mapView && mapView.userMarker && mapView.userMarker.position) {
+            const userNormal = {
+              x: mapView.userMarker.position.x,
+              y: mapView.userMarker.position.y,
+              z: mapView.userMarker.position.z
+            };
+            console.log('🎵 Starting initial music based on user position');
+            mapView.audioManager.update(userNormal);
+          } else {
+            console.log('🎵 User position not yet available, will start on first position update');
+          }
+        };
       }
     } else {
       showScreen('auth');
@@ -2217,16 +2250,8 @@ class MapView {
       this.pathFinder.setPlaces(this.placeholders, getHeightAtFunc);
       this.audioManager.setPlaces(this.placeholders);
 
-      // ⭐ Start initial music based on user position
-      if (this.userMarker && this.userMarker.position) {
-        const userNormal = {
-          x: this.userMarker.position.x,
-          y: this.userMarker.position.y,
-          z: this.userMarker.position.z
-        };
-        console.log('🎵 Starting initial music based on user position');
-        this.audioManager.update(userNormal);
-      }
+      // ⭐ Audio initialization now happens via "Start" button (browser autoplay policy)
+      // Music will start when user clicks the audio start overlay button
 
       console.log(`📍 ✅ Successfully loaded ${this.placeholders.length} place(s) from Firebase`);
     } catch (error) {

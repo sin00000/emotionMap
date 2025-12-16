@@ -195,6 +195,12 @@ export class AudioManager {
   update(userNormal) {
     if (!userNormal) return;
 
+    // ⭐ Resume audio context if suspended (browser autoplay policy)
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      console.log('🎵 Resuming suspended audio context');
+      this.audioContext.resume().catch(e => console.warn('Could not resume audio context:', e));
+    }
+
     this.userNormal = userNormal;
 
     if (!this.places || this.places.length === 0) {
