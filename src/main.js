@@ -2217,6 +2217,17 @@ class MapView {
       this.pathFinder.setPlaces(this.placeholders, getHeightAtFunc);
       this.audioManager.setPlaces(this.placeholders);
 
+      // ⭐ Start initial music based on user position
+      if (this.userMarker && this.userMarker.position) {
+        const userNormal = {
+          x: this.userMarker.position.x,
+          y: this.userMarker.position.y,
+          z: this.userMarker.position.z
+        };
+        console.log('🎵 Starting initial music based on user position');
+        this.audioManager.update(userNormal);
+      }
+
       console.log(`📍 ✅ Successfully loaded ${this.placeholders.length} place(s) from Firebase`);
     } catch (error) {
       console.error('❌ Firebase load failed!');
@@ -3164,19 +3175,30 @@ class MapView {
     // ⭐ Force play destination's music immediately
     // Rule: "Routes without music DO NOT EXIST"
     // Navigation path exists → destination music must play
-    this.audioManager.activePlaceId = null; // Reset current place
+    console.log(`🎵 Force-playing destination music: ${destination.name}`);
+
+    // Stop any existing music (including neutral emptiness)
+    if (this.audioManager.currentAudio) {
+      this.audioManager.currentAudio.pause();
+      this.audioManager.currentAudio.onended = null;
+      this.audioManager.currentAudio = null;
+    }
+
+    // Stop drone if active
+    if (this.audioManager.droneOscillator) {
+      this.audioManager.stopNeutralDrone();
+    }
+
+    // Set destination as active place
+    this.audioManager.isNeutral = false;
+    this.audioManager.activePlaceId = destination.placeId;
     this.audioManager.activeKeywords = destination.emotionKeywords || [];
     this.audioManager.currentKeywordIndex = 0;
+    this.audioManager.currentVolume = 0.8; // Comfortable navigation volume
 
     if (this.audioManager.activeKeywords.length > 0) {
-      console.log(`🎵 Force-playing destination music: ${destination.name}`);
       console.log(`🎵 Keywords: ${this.audioManager.activeKeywords.join(', ')}`);
       this.audioManager.playNextKeywordTrack();
-      this.audioManager.activePlaceId = destination.placeId; // Mark as active
-      this.audioManager.currentVolume = 0.8; // Set comfortable volume for navigation
-      if (this.audioManager.currentAudio) {
-        this.audioManager.currentAudio.volume = 0.8 * this.audioManager.masterVolume;
-      }
     } else {
       console.warn(`⚠️ Destination ${destination.name} has no emotion keywords - no music`);
     }

@@ -267,42 +267,33 @@ export class AudioManager {
 
   /**
    * Enter neutral state (far from all places)
-   * Start drone oscillator, fade out theme music
+   * Play "emptiness" BGM instead of drone oscillator
    * @param {number} wMax - Maximum weight (distance to closest place)
    */
   enterNeutralState(wMax = 0) {
-    if (this.isNeutral) {
-      // Already neutral, just update drone volume
-      if (this.droneGain) {
-        const droneVol = ((0.15 - wMax) / 0.15) * 0.25;
-        this.droneGain.gain.value = droneVol;
+    if (this.isNeutral && this.activePlaceId === 'neutral_emptiness') {
+      // Already playing emptiness music, just update volume
+      this.currentVolume = Math.max(0.5, 1.0 - wMax * 2); // Comfortable volume in neutral
+      if (this.currentAudio) {
+        this.currentAudio.volume = this.currentVolume * this.masterVolume;
       }
       return;
     }
 
-    console.log('🎵 Entering neutral state (white background)');
+    console.log('🎵 Entering neutral state (playing emptiness BGM)');
     this.isNeutral = true;
-    this.activePlaceId = null;
-    this.activeKeywords = [];
+    this.activePlaceId = 'neutral_emptiness'; // Mark as neutral emptiness
+    this.activeKeywords = ['emptiness']; // Play emptiness emotion
+    this.currentKeywordIndex = 0;
+    this.currentVolume = 0.7; // Comfortable neutral volume
 
-    // Fade out theme music
-    if (this.currentAudio) {
-      this.currentAudio.volume = 0;
-      setTimeout(() => {
-        if (this.currentAudio) {
-          this.currentAudio.pause();
-          this.currentAudio = null;
-        }
-      }, 500);
+    // Stop any old drone oscillator if exists
+    if (this.droneOscillator) {
+      this.stopNeutralDrone();
     }
 
-    // Start drone
-    const droneVol = ((0.15 - wMax) / 0.15) * 0.25;
-    if (!this.droneOscillator) {
-      this.startNeutralDrone(droneVol);
-    } else if (this.droneGain) {
-      this.droneGain.gain.value = droneVol;
-    }
+    // Play emptiness music
+    this.playNextKeywordTrack();
   }
 
   /**
