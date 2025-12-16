@@ -297,13 +297,8 @@ async function searchRealPlaces(query) {
   } catch (error) {
     console.error('❌ OpenStreetMap API Failed:', error);
 
-    // Provide helpful error message
-    if (error.name === 'TypeError' && error.message.includes('fetch')) {
-      alert('인터넷 연결을 확인해주세요');
-    } else {
-      console.error('검색 중 오류가 발생했습니다');
-    }
-
+    // Return empty array - error will be handled by UI in performPlaceSearch
+    // This prevents repeated alert popups during typing
     return [];
   }
 }
@@ -885,6 +880,11 @@ class MapView {
     this.currentDestination = null;
     this.navigationProgress = 0;
     this.navMessageTimeout = null;
+
+    // Search debounce
+    this.searchTimeout = null;
+    this.searchRequestId = 0; // Track search request order
+    this.lastSearchErrorTime = 0; // Track last search error to prevent repeated alerts
 
     // GPS tracking
     this.gpsWatchId = null;
@@ -3533,10 +3533,19 @@ class MapView {
   setupSearchPlaceModal() {
     const searchInput = document.getElementById('search-place-input');
 
-    // Real-time search on input
+    // Debounced search on input (500ms delay)
     searchInput.addEventListener('input', (e) => {
       const query = e.target.value.trim();
-      this.performPlaceSearch(query);
+
+      // Clear previous timeout
+      if (this.searchTimeout) {
+        clearTimeout(this.searchTimeout);
+      }
+
+      // Set new timeout - only search after user stops typing for 500ms
+      this.searchTimeout = setTimeout(() => {
+        this.performPlaceSearch(query);
+      }, 500);
     });
 
     // Prevent keyboard controls from triggering while typing
@@ -3550,6 +3559,9 @@ class MapView {
    */
   async performPlaceSearch(query) {
     const resultsList = document.getElementById('search-results-list');
+
+    // Increment request ID to track this specific request
+    const currentRequestId = ++this.searchRequestId;
 
     try {
       // Show hint if query is too short
@@ -3565,6 +3577,12 @@ class MapView {
 
       // Call async searchRealPlaces (Google Maps API)
       const results = await searchRealPlaces(query);
+
+      // Ignore results if a newer search has been initiated
+      if (currentRequestId !== this.searchRequestId) {
+        console.log(`📍 Ignoring outdated search results (ID: ${currentRequestId})`);
+        return;
+      }
 
       resultsList.innerHTML = '';
 
@@ -3591,10 +3609,26 @@ class MapView {
         resultsList.appendChild(resultItem);
       });
 
-      console.log(`📍 ${results.length} search results displayed`);
+      console.log(`📍 ${results.length} search results displayed (ID: ${currentRequestId})`);
     } catch (error) {
+      // Ignore errors from outdated requests
+      if (currentRequestId !== this.searchRequestId) {
+        return;
+      }
       console.error('Search failed:', error);
-      resultsList.innerHTML = '<p style="text-align: center; color: #F44336; padding: 1rem;">검색 실패</p>';
+
+      // Show user-friendly error message in UI (not alert)
+      const now = Date.now();
+      const timeSinceLastError = now - this.lastSearchErrorTime;
+
+      // Show alert only once per 10 seconds to prevent spam
+      if (error.name === 'TypeError' && error.message.includes('fetch') && timeSinceLastError > 10000) {
+        this.lastSearchErrorTime = now;
+        alert('인터넷 연결을 확인해주세요');
+      }
+
+      // Always show UI error message
+      resultsList.innerHTML = '<p style="text-align: center; color: #F44336; padding: 1rem;">검색 실패 - 인터넷 연결을 확인하세요</p>';
     }
   }
 
