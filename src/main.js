@@ -3161,9 +3161,25 @@ class MapView {
     // Start audio updates
     this.startAudioUpdates();
 
-    // Force audio refresh for navigation start
-    this.audioManager.activePlaceId = null;
-    this.audioManager.update(userNormal);
+    // ⭐ Force play destination's music immediately
+    // Rule: "Routes without music DO NOT EXIST"
+    // Navigation path exists → destination music must play
+    this.audioManager.activePlaceId = null; // Reset current place
+    this.audioManager.activeKeywords = destination.emotionKeywords || [];
+    this.audioManager.currentKeywordIndex = 0;
+
+    if (this.audioManager.activeKeywords.length > 0) {
+      console.log(`🎵 Force-playing destination music: ${destination.name}`);
+      console.log(`🎵 Keywords: ${this.audioManager.activeKeywords.join(', ')}`);
+      this.audioManager.playNextKeywordTrack();
+      this.audioManager.activePlaceId = destination.placeId; // Mark as active
+      this.audioManager.currentVolume = 0.8; // Set comfortable volume for navigation
+      if (this.audioManager.currentAudio) {
+        this.audioManager.currentAudio.volume = 0.8 * this.audioManager.masterVolume;
+      }
+    } else {
+      console.warn(`⚠️ Destination ${destination.name} has no emotion keywords - no music`);
+    }
 
     // Show fallback warning if using relaxed slope limit
     if (pathResult.isFallback && pathResult.warning) {
