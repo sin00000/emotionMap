@@ -30,9 +30,10 @@ dist-ssr
 .env.production
 
 # Music files (add your own)
-public/song/*.mp3
-public/song/*.wav
-public/song/*.ogg
+# Commented out to allow mp3 files in Git for GitHub Pages deployment
+# public/song/*.mp3
+# public/song/*.wav
+# public/song/*.ogg
 
 # Keep the README in song directory
 !public/song/README.md
